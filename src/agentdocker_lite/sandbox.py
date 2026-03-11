@@ -496,6 +496,7 @@ class Sandbox:
         self._overlay_mounted = False
         self._btrfs_active = False
         self._bind_mounts: list[Path] = []
+        self._cow_tmpdirs: list[str] = []
         self._cgroup_path: Optional[Path] = None
         self._cgroup_limits = {
             "cpu_max": config.cpu_max,
@@ -943,7 +944,10 @@ class Sandbox:
             host_path = parts[0]
             container_path = parts[1] if len(parts) > 1 else "/"
             mode = parts[2] if len(parts) > 2 else "rw"
-            self._bind_mount(host_path, container_path, read_only=(mode == "ro"))
+            if mode == "cow":
+                self._overlay_mount(host_path, container_path)
+            else:
+                self._bind_mount(host_path, container_path, read_only=(mode == "ro"))
 
     def _bind_mount(
         self, host_path: str, container_path: str, read_only: bool = False
@@ -979,10 +983,55 @@ class Sandbox:
             "ro" if read_only else "rw",
         )
 
+    def _overlay_mount(self, host_path: str, container_path: str):
+        """Mount a host directory as copy-on-write via overlayfs.
+
+        Writes inside the sandbox go to a temporary upperdir; the host
+        directory is never modified.  Mode ``"cow"`` in volume specs.
+        """
+        import tempfile
+
+        target = self._rootfs / container_path.lstrip("/")
+        target.mkdir(parents=True, exist_ok=True)
+
+        work_base = tempfile.mkdtemp(prefix="adl_cow_")
+        upper = Path(work_base) / "upper"
+        work = Path(work_base) / "work"
+        upper.mkdir()
+        work.mkdir()
+
+        result = subprocess.run(
+            [
+                "mount", "-t", "overlay", "overlay",
+                "-o", f"lowerdir={host_path},upperdir={upper},workdir={work}",
+                str(target),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to overlay mount %s -> %s: %s",
+                host_path, container_path, result.stderr.strip(),
+            )
+            return
+
+        # Track for cleanup (unmount overlay, then remove tmpdir)
+        self._bind_mounts.append(target)
+        self._cow_tmpdirs.append(work_base)
+        logger.debug(
+            "Overlay mounted %s -> %s (cow, upper=%s)", host_path, container_path, upper,
+        )
+
     def _unmount_binds(self):
+        import shutil
+
         for mount_point in reversed(self._bind_mounts):
             subprocess.run(["umount", "-l", str(mount_point)], capture_output=True)
         self._bind_mounts.clear()
+        for tmpdir in self._cow_tmpdirs:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        self._cow_tmpdirs = []
 
     def _unmount_all(self):
         self._unmount_binds()
