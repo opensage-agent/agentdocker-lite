@@ -4,7 +4,7 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from lite_sandbox import Sandbox, SandboxConfig
+from agentdocker_lite import Sandbox, SandboxConfig
 
 
 def worker(worker_id: int) -> dict:

@@ -1,4 +1,4 @@
-"""Tests for lite-sandbox.
+"""Tests for agentdocker-lite.
 
 These tests require root and Docker (for auto rootfs preparation).
 Run with: sudo python -m pytest tests/ -v
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from lite_sandbox import Sandbox, SandboxConfig
+from agentdocker_lite import Sandbox, SandboxConfig
 
 # Use a pre-existing rootfs if available, otherwise fall back to Docker image.
 # Set LITE_SANDBOX_TEST_IMAGE env var to override.

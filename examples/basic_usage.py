@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Basic usage example for lite-sandbox.
+"""Basic usage example for agentdocker-lite.
 
 Must be run as root (requires mount/cgroup operations).
 Requires Docker to auto-prepare rootfs from image names.
 """
 
-from lite_sandbox import Sandbox, SandboxConfig
+from agentdocker_lite import Sandbox, SandboxConfig
 
 
 def main():

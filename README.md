@@ -1,4 +1,4 @@
-# lite-sandbox
+# agentdocker-lite
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
 
@@ -25,14 +25,14 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 ## Install
 
 ```bash
-cd lite-sandbox
+cd agentdocker-lite
 pip install -e .
 ```
 
 ## Quick start
 
 ```python
-from lite_sandbox import Sandbox, SandboxConfig
+from agentdocker_lite import Sandbox, SandboxConfig
 
 config = SandboxConfig(
     image="ubuntu:22.04",       # Docker image or path to rootfs dir
@@ -64,8 +64,8 @@ SandboxConfig(
     environment={"FOO": "bar"},     # Extra env vars
     volumes=["/host/path:/container/path:ro"],  # Bind mounts
     fs_backend="overlayfs",         # "overlayfs" or "btrfs"
-    env_base_dir="/tmp/lite_sandbox",
-    rootfs_cache_dir="/tmp/lite_sandbox_rootfs_cache",
+    env_base_dir="/tmp/agentdocker_lite",
+    rootfs_cache_dir="/tmp/agentdocker_lite_rootfs_cache",
     cpu_max="50000 100000",         # cgroup cpu.max
     memory_max="536870912",         # cgroup memory.max (bytes)
     pids_max="256",                 # cgroup pids.max

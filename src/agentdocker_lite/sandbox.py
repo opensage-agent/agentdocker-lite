@@ -66,8 +66,8 @@ class SandboxConfig:
     environment: dict[str, str] = field(default_factory=dict)
     volumes: list[str] = field(default_factory=list)
     fs_backend: str = "overlayfs"
-    env_base_dir: str = "/tmp/lite_sandbox"
-    rootfs_cache_dir: str = "/tmp/lite_sandbox_rootfs_cache"
+    env_base_dir: str = "/tmp/agentdocker_lite"
+    rootfs_cache_dir: str = "/tmp/agentdocker_lite_rootfs_cache"
     cpu_max: Optional[str] = None
     memory_max: Optional[str] = None
     pids_max: Optional[str] = None
@@ -448,7 +448,7 @@ class Sandbox:
 
     Example::
 
-        from lite_sandbox import Sandbox, SandboxConfig
+        from agentdocker_lite import Sandbox, SandboxConfig
 
         config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
         sb = Sandbox(config, name="worker-0")
@@ -765,7 +765,7 @@ class Sandbox:
         if candidate.exists() and candidate.is_dir():
             return candidate
 
-        from lite_sandbox.rootfs import (
+        from agentdocker_lite.rootfs import (
             prepare_btrfs_rootfs_from_docker,
             prepare_rootfs_from_docker,
         )
@@ -1004,7 +1004,7 @@ class Sandbox:
             return
 
         cgroup_name = self._env_dir.name
-        self._cgroup_path = Path(f"/sys/fs/cgroup/lite_sandbox/{cgroup_name}")
+        self._cgroup_path = Path(f"/sys/fs/cgroup/agentdocker_lite/{cgroup_name}")
         try:
             self._cgroup_path.mkdir(parents=True, exist_ok=True)
         except OSError as e:
