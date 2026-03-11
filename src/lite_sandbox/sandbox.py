@@ -1137,6 +1137,9 @@ class Sandbox:
             "TERM": "xterm-256color",
             "LANG": "C.UTF-8",
         }
+        if self._config.tty:
+            env["TERM"] = "dumb"
+            env["NO_COLOR"] = "1"
         env.update(self._config.environment)
         return env
 
