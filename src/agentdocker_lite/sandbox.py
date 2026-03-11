@@ -190,6 +190,24 @@ class _PersistentShell:
         # Initialize shell: disable prompts, cd to working dir, signal ready.
         init_script = (
             "PS1='' PS2=''\n"
+            # Mount /proc (needed for $ORIGIN RPATH, /proc/self/fd, ps, etc.)
+            "mount -t proc proc /proc 2>/dev/null\n"
+            # Populate /dev with essential device nodes and symlinks.
+            # Docker export leaves /dev nearly empty (regular files, not devices).
+            # NOTE: /dev/null must be created FIRST — later 2>/dev/null redirects
+            # would otherwise create it as a regular file on the fresh tmpfs.
+            "mount -t tmpfs -o nosuid,mode=0755 tmpfs /dev 2>/proc/self/fd/1\n"
+            "mknod -m 666 /dev/null c 1 3\n"
+            "mknod -m 666 /dev/zero c 1 5 2>/dev/null\n"
+            "mknod -m 666 /dev/full c 1 7 2>/dev/null\n"
+            "mknod -m 444 /dev/random c 1 8 2>/dev/null\n"
+            "mknod -m 444 /dev/urandom c 1 9 2>/dev/null\n"
+            "mknod -m 666 /dev/tty c 5 0 2>/dev/null\n"
+            "ln -sf /proc/self/fd /dev/fd 2>/dev/null\n"
+            "ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null\n"
+            "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
+            "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
+            "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
             f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
             f"echo 0 >&{self._signal_fd}\n"
         )
