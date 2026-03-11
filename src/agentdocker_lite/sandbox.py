@@ -126,10 +126,11 @@ class _PersistentShell:
         if self._process and self._process.poll() is None:
             self.kill()
 
-        # Create signal pipe: fd 3 in the child will be the write end.
-        # We read from _signal_r to know when a command finishes and its exit code.
+        # Create signal pipe for command completion signaling.
+        # The child writes its exit code to signal_w; we read from signal_r.
         signal_r, signal_w = os.pipe()
         self._signal_r = signal_r
+        self._signal_fd = signal_w  # Remember fd number for bash scripts
 
         cmd: list[str] = ["unshare", "--pid", "--mount"]
         if self._net_isolate:
@@ -190,7 +191,7 @@ class _PersistentShell:
         init_script = (
             "PS1='' PS2=''\n"
             f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
-            f"echo 0 >&3\n"
+            f"echo 0 >&{self._signal_fd}\n"
         )
         self._write_input(init_script.encode())
 
@@ -247,7 +248,7 @@ class _PersistentShell:
         from ``/dev/null`` to prevent commands from consuming the
         control pipe.
 
-        Completion is signaled via fd 3 (a separate pipe), so command
+        Completion is signaled via the signal pipe fd, so command
         output can never collide with the control protocol.
         """
         with self._lock:
@@ -258,11 +259,11 @@ class _PersistentShell:
             # Protocol:
             #   1. cd to working_dir
             #   2. run command in isolated sub-shell, stdin=/dev/null
-            #   3. write exit code to fd 3 (signal pipe)
+            #   3. write exit code to signal pipe fd
             script = (
                 f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"bash -c {shlex.quote(command)} </dev/null 2>&1\n"
-                f"echo $? >&3\n"
+                f"echo $? >&{self._signal_fd}\n"
             )
 
             if not self._write_input(script.encode()):

@@ -9,6 +9,24 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _pull_or_check_local(image_name: str) -> None:
+    """Pull image, falling back to local if pull fails but image exists."""
+    logger.info("Pulling image: %s", image_name)
+    result = subprocess.run(
+        ["docker", "pull", image_name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        check = subprocess.run(
+            ["docker", "image", "inspect", image_name],
+            capture_output=True,
+        )
+        if check.returncode != 0:
+            raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
+        logger.info("Pull failed but image exists locally: %s", image_name)
+
+
 def prepare_rootfs_from_docker(
     image_name: str,
     output_dir: str | Path,
@@ -36,14 +54,7 @@ def prepare_rootfs_from_docker(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if pull:
-        logger.info("Pulling image: %s", image_name)
-        result = subprocess.run(
-            ["docker", "pull", image_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
+        _pull_or_check_local(image_name)
 
     logger.info("Creating temporary container from %s", image_name)
     create = subprocess.run(
@@ -194,14 +205,7 @@ def prepare_btrfs_rootfs_from_docker(
     logger.info("Created btrfs subvolume: %s", subvolume_path)
 
     if pull:
-        logger.info("Pulling image: %s", image_name)
-        result = subprocess.run(
-            ["docker", "pull", image_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
+        _pull_or_check_local(image_name)
 
     logger.info("Creating temporary container from %s", image_name)
     create = subprocess.run(
