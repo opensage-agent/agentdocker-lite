@@ -113,10 +113,15 @@ for sb in sandboxes:
 
 ## Performance comparison
 
-Reproduce with:
+| | Docker | agentdocker-lite | Speedup |
+|---|---|---|---|
+| Create | ~271ms | ~10ms | **27x** |
+| Per command (avg) | ~22ms | ~11ms | **2x** |
+| Reset | ~504ms | ~11ms | **45x** |
+| Delete | ~104ms | ~2ms | **52x** |
+
+Measured on ubuntu:22.04 with 20 commands, rootfs pre-cached. Reproduce with:
 
 ```bash
 sudo python examples/benchmark.py
 ```
-
-This runs identical operations (create, N commands, reset, delete) on both Docker and agentdocker-lite, and prints a comparison table with speedup ratios.

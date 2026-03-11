@@ -119,6 +119,12 @@ def main():
 
     print(f"Benchmarking with {IMAGE}, {N_COMMANDS} commands each\n")
 
+    # Warmup: ensure rootfs is cached (first export is slow)
+    from agentdocker_lite import Sandbox, SandboxConfig
+    print("Warming up (caching rootfs)...")
+    _sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name="adl-bench-warmup")
+    _sb.delete()
+
     print("Running Docker benchmark...")
     docker = bench_docker()
 
