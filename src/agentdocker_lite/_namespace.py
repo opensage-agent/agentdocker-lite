@@ -150,6 +150,10 @@ class NamespaceSandbox(SandboxBase):
 
         self._bg_handles: dict[str, str] = {}  # handle -> pid
 
+        # Write PID file for stale sandbox cleanup
+        pid_file = self._env_dir / ".pid"
+        pid_file.write_text(str(os.getpid()))
+
         logger.info(
             "Sandbox ready: name=%s rootfs=%s fs=%s "
             "[setup: fs=%.1fms cgroup=%.1fms volumes=%.1fms shell=%.1fms]",
@@ -332,6 +336,10 @@ class NamespaceSandbox(SandboxBase):
 
         Called from the init_script inside the chroot (after mounts are done).
         Uses the security module's apply_seccomp_filter via a copy of the source.
+
+        Also checks whether any python interpreter exists in the rootfs and
+        logs a warning if none is found (seccomp will be silently skipped at
+        runtime in that case).
         """
         import inspect
         from agentdocker_lite import security
@@ -347,6 +355,26 @@ class NamespaceSandbox(SandboxBase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(helper)
         target.chmod(0o755)
+
+        # Check if any python interpreter exists in rootfs
+        python_candidates = [
+            "python3", "python3.13", "python3.12", "python3.11", "python3.10", "python",
+        ]
+        found = False
+        for py in python_candidates:
+            for bin_dir in ("usr/bin", "usr/local/bin", "bin"):
+                if (self._rootfs / bin_dir / py).exists():
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            logger.warning(
+                "No python interpreter found in rootfs %s — seccomp filter "
+                "will NOT be applied inside the sandbox. Install python3 in "
+                "the Docker image to enable seccomp hardening.",
+                self._rootfs,
+            )
 
     # ------------------------------------------------------------------ #
     #  Filesystem -- overlayfs                                             #

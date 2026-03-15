@@ -359,3 +359,98 @@ class SandboxBase(abc.ABC):
 
     def __repr__(self) -> str:
         return f"Sandbox(name={self._name!r}, fs={self._fs_backend}, rootfs={self._rootfs})"
+
+    # ------------------------------------------------------------------ #
+    #  Stale sandbox cleanup                                               #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def cleanup_stale(env_base_dir: str = "/tmp/agentdocker_lite") -> int:
+        """Clean up orphaned sandboxes left by crashed processes.
+
+        Scans *env_base_dir* for sandbox directories, checks if the owner
+        process is still alive (via the ``.pid`` file written at creation),
+        and cleans up dead ones (unmount, remove cgroup, remove directory).
+
+        Returns:
+            Number of cleaned-up sandboxes.
+        """
+        base = Path(env_base_dir)
+        if not base.exists():
+            return 0
+
+        cleaned = 0
+        for entry in base.iterdir():
+            if not entry.is_dir():
+                continue
+
+            pid_file = entry / ".pid"
+            if not pid_file.exists():
+                # No .pid file — likely not ours or very old; skip
+                logger.debug("Skipping %s (no .pid file)", entry)
+                continue
+
+            try:
+                pid = int(pid_file.read_text().strip())
+            except (ValueError, OSError):
+                logger.debug("Skipping %s (unreadable .pid file)", entry)
+                continue
+
+            # Check if process is alive
+            alive = False
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                # Process exists but we can't signal it — treat as alive
+                alive = True
+
+            if alive:
+                logger.debug("Sandbox %s owner pid %d still alive, skipping", entry.name, pid)
+                continue
+
+            # Process is dead — clean up
+            logger.info("Cleaning up stale sandbox %s (pid %d dead)", entry.name, pid)
+
+            # Unmount everything under the rootfs
+            rootfs_dir = entry / "rootfs"
+            if rootfs_dir.exists():
+                subprocess.run(
+                    ["umount", "-R", "-l", str(rootfs_dir)],
+                    capture_output=True,
+                )
+
+            # Remove cgroup
+            cgroup_path = Path(f"/sys/fs/cgroup/agentdocker_lite/{entry.name}")
+            if cgroup_path.exists():
+                # Kill remaining processes in the cgroup
+                kill_file = cgroup_path / "cgroup.kill"
+                if kill_file.exists():
+                    try:
+                        kill_file.write_text("1")
+                    except OSError:
+                        pass
+                procs_file = cgroup_path / "cgroup.procs"
+                if procs_file.exists():
+                    try:
+                        for p in procs_file.read_text().strip().split():
+                            try:
+                                os.kill(int(p), 9)
+                            except (ProcessLookupError, ValueError):
+                                pass
+                    except OSError:
+                        pass
+                try:
+                    cgroup_path.rmdir()
+                except OSError as e:
+                    logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
+
+            # Remove directory
+            shutil.rmtree(entry, ignore_errors=True)
+            cleaned += 1
+
+        if cleaned:
+            logger.info("Cleaned up %d stale sandbox(es) under %s", cleaned, env_base_dir)
+        return cleaned

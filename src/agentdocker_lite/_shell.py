@@ -192,9 +192,14 @@ class _PersistentShell:
                 "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
                 "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
                 "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
-                # Apply seccomp AFTER mounts (mount syscall needed above)
+                # Apply seccomp AFTER mounts (mount syscall needed above).
+                # Try multiple python interpreters since images vary.
                 + (
-                    "python3 /tmp/.adl_seccomp.py 2>/dev/null || true\n"
+                    "for py in python3 python3.13 python3.12 python3.11 python3.10 python; do\n"
+                    "  if command -v $py >/dev/null 2>&1; then\n"
+                    "    $py /tmp/.adl_seccomp.py 2>/dev/null && break\n"
+                    "  fi\n"
+                    "done\n"
                     if self._seccomp else ""
                 )
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
