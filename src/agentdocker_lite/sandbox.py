@@ -59,12 +59,22 @@ class SandboxConfig:
             ``False`` preserves the fast pipe-based path.
         net_isolate: Create a separate network namespace (loopback only).
             Default ``False`` inherits the host network.
+        devices: Host device paths to bind-mount into the sandbox
+            (e.g. ``["/dev/kvm"]``).
+        seccomp: Enable seccomp-bpf filter to block dangerous syscalls
+            (ptrace, mount, kexec, bpf, etc.). Default ``True``.
+        landlock_read: Paths allowed for read-only access under Landlock.
+            If set, all other paths are denied. ``None`` disables Landlock.
+        landlock_write: Paths allowed for read-write access under Landlock.
+        landlock_tcp_ports: TCP ports allowed for connect under Landlock.
+            ``None`` means no network restriction.
     """
 
     image: str = ""
     working_dir: str = "/"
     environment: dict[str, str] = field(default_factory=dict)
     volumes: list[str] = field(default_factory=list)
+    devices: list[str] = field(default_factory=list)
     fs_backend: str = "overlayfs"
     env_base_dir: str = "/tmp/agentdocker_lite"
     rootfs_cache_dir: str = "/tmp/agentdocker_lite_rootfs_cache"
@@ -73,6 +83,10 @@ class SandboxConfig:
     pids_max: Optional[str] = None
     tty: bool = False
     net_isolate: bool = False
+    seccomp: bool = True
+    landlock_read: Optional[list[str]] = None
+    landlock_write: Optional[list[str]] = None
+    landlock_tcp_ports: Optional[list[int]] = None
 
 
 # ====================================================================== #
@@ -104,6 +118,10 @@ class _PersistentShell:
         cgroup_path: Optional[Path] = None,
         tty: bool = False,
         net_isolate: bool = False,
+        seccomp: bool = True,
+        landlock_read: Optional[list[str]] = None,
+        landlock_write: Optional[list[str]] = None,
+        landlock_tcp_ports: Optional[list[int]] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -112,6 +130,10 @@ class _PersistentShell:
         self._cgroup_path = cgroup_path
         self._tty = tty
         self._net_isolate = net_isolate
+        self._seccomp = seccomp
+        self._landlock_read = landlock_read
+        self._landlock_write = landlock_write
+        self._landlock_tcp_ports = landlock_tcp_ports
         self._process: Optional[subprocess.Popen] = None
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
@@ -139,18 +161,35 @@ class _PersistentShell:
         if "bash" in self._shell:
             cmd.extend(["--norc", "--noprofile"])
 
-        preexec_fn = None
-        if self._cgroup_path:
-            cg_procs = self._cgroup_path / "cgroup.procs"
+        # Build preexec_fn: cgroup + seccomp + landlock (applied in child after fork)
+        _cg_path = self._cgroup_path
+        _seccomp = self._seccomp
+        _ll_read = self._landlock_read
+        _ll_write = self._landlock_write
+        _ll_ports = self._landlock_tcp_ports
 
-            def _add_to_cgroup() -> None:
+        def _preexec() -> None:
+            # 1. cgroup
+            if _cg_path:
                 try:
-                    with open(cg_procs, "w") as f:
+                    with open(_cg_path / "cgroup.procs", "w") as f:
                         f.write(str(os.getpid()))
                 except Exception:
                     pass
+            # 2. Landlock (must be before seccomp since seccomp may block landlock syscalls)
+            if _ll_read is not None or _ll_write is not None:
+                from agentdocker_lite.security import apply_landlock
+                apply_landlock(
+                    read_paths=_ll_read,
+                    write_paths=_ll_write,
+                    allowed_tcp_ports=_ll_ports,
+                )
+            # 3. seccomp (applied last — blocks future privilege escalation)
+            if _seccomp:
+                from agentdocker_lite.security import apply_seccomp_filter
+                apply_seccomp_filter()
 
-            preexec_fn = _add_to_cgroup
+        preexec_fn = _preexec
 
         if self._tty:
             master_fd, slave_fd = pty_mod.openpty()
@@ -556,6 +595,10 @@ class Sandbox:
             cgroup_path=self._cgroup_path,
             tty=config.tty,
             net_isolate=config.net_isolate,
+            seccomp=config.seccomp,
+            landlock_read=config.landlock_read,
+            landlock_write=config.landlock_write,
+            landlock_tcp_ports=config.landlock_tcp_ports,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 

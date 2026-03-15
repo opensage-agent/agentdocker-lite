@@ -111,6 +111,41 @@ for sb in sandboxes:
     sb.delete()
 ```
 
+## Security hardening
+
+### seccomp-bpf (enabled by default)
+
+Blocks dangerous syscalls (ptrace, mount, kexec, bpf, unshare, setns) inside the sandbox. Prevents sandbox escape via privilege escalation.
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    seccomp=True,  # default, block dangerous syscalls
+)
+```
+
+### Landlock (filesystem + network restrictions)
+
+Restrict which paths the sandbox can read/write, and which TCP ports it can connect to. Requires kernel 5.13+ (filesystem) / 6.7+ (network).
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    landlock_read=["/usr", "/lib", "/etc"],   # read-only paths
+    landlock_write=["/tmp", "/workspace"],     # read-write paths
+    landlock_tcp_ports=[80, 443, 8080],        # allowed outbound TCP ports
+)
+```
+
+### Device passthrough
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    devices=["/dev/kvm"],  # KVM passthrough for QEMU
+)
+```
+
 ## Performance comparison
 
 | | Docker | agentdocker-lite | Speedup |
