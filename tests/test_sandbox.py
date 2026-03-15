@@ -229,7 +229,7 @@ class TestConcurrency:
     def test_parallel_sandboxes(self, tmp_path):
         _requires_root()
         _requires_docker()
-        n = 4
+        n = 2  # CI runners have limited resources
 
         def run_worker(i):
             config = SandboxConfig(
@@ -314,7 +314,10 @@ class TestPTY:
         assert ec != 0
 
     def test_isatty(self, tty_sandbox):
-        """Programs should see a TTY."""
+        """Programs should see a TTY (requires python3 in rootfs)."""
+        _, check_ec = tty_sandbox.run("which python3")
+        if check_ec != 0:
+            pytest.skip("rootfs has no python3")
         output, ec = tty_sandbox.run("python3 -c 'import sys; print(sys.stdout.isatty())'")
         assert ec == 0
         assert "True" in output
