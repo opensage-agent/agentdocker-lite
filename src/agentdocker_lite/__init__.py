@@ -1,6 +1,6 @@
 """agentdocker-lite: Lightweight Linux namespace sandbox for high-frequency workloads."""
 
-from agentdocker_lite._base import SandboxBase, SandboxConfig
+from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
 from agentdocker_lite.sandbox import Sandbox
 
 __all__ = ["Sandbox", "SandboxConfig", "SandboxBase"]

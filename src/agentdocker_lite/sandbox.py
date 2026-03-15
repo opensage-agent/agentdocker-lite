@@ -7,7 +7,7 @@ as a regular user (Landlock-based sandboxing).
 
 from __future__ import annotations
 
-from agentdocker_lite._base import SandboxBase, SandboxConfig
+from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
 
 
 def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:
@@ -23,10 +23,10 @@ def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:
     import os
 
     if os.geteuid() == 0:
-        from agentdocker_lite._namespace import NamespaceSandbox
+        from agentdocker_lite.backends.namespace import NamespaceSandbox
 
         return NamespaceSandbox(config, name)
     else:
-        from agentdocker_lite._landlock import LandlockSandbox
+        from agentdocker_lite.backends.landlock import LandlockSandbox
 
         return LandlockSandbox(config, name)

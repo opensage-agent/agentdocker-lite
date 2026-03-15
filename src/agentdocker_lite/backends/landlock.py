@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-from agentdocker_lite._base import SandboxBase, SandboxConfig
+from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
 from agentdocker_lite._shell import _PersistentShell
 
 logger = logging.getLogger(__name__)
