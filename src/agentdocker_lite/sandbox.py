@@ -166,33 +166,36 @@ class _PersistentShell:
         if "bash" in self._shell:
             cmd.extend(["--norc", "--noprofile"])
 
-        # Build preexec_fn: cgroup + seccomp + landlock (applied in child after fork)
+        # Build preexec_fn
         _cg_path = self._cgroup_path
-        _seccomp = self._seccomp
-        _ll_read = self._landlock_read
-        _ll_write = self._landlock_write
-        _ll_ports = self._landlock_tcp_ports
+        if self._rootless:
+            # Rootless: Landlock + seccomp in preexec (no unshare/chroot to interfere)
+            _seccomp = self._seccomp
+            _ll_read = self._landlock_read
+            _ll_write = self._landlock_write
+            _ll_ports = self._landlock_tcp_ports
 
-        def _preexec() -> None:
-            # 1. cgroup
-            if _cg_path:
-                try:
-                    with open(_cg_path / "cgroup.procs", "w") as f:
-                        f.write(str(os.getpid()))
-                except Exception:
-                    pass
-            # 2. Landlock (must be before seccomp since seccomp may block landlock syscalls)
-            if _ll_read is not None or _ll_write is not None:
-                from agentdocker_lite.security import apply_landlock
-                apply_landlock(
-                    read_paths=_ll_read,
-                    write_paths=_ll_write,
-                    allowed_tcp_ports=_ll_ports,
-                )
-            # 3. seccomp (applied last — blocks future privilege escalation)
-            if _seccomp:
-                from agentdocker_lite.security import apply_seccomp_filter
-                apply_seccomp_filter()
+            def _preexec() -> None:
+                if _ll_read is not None or _ll_write is not None:
+                    from agentdocker_lite.security import apply_landlock
+                    apply_landlock(
+                        read_paths=_ll_read,
+                        write_paths=_ll_write,
+                        allowed_tcp_ports=_ll_ports,
+                    )
+                if _seccomp:
+                    from agentdocker_lite.security import apply_seccomp_filter
+                    apply_seccomp_filter()
+        else:
+            # Root mode: only cgroup in preexec. seccomp applied via init script
+            # AFTER mount /proc + /dev (which need mount syscall to work first).
+            def _preexec() -> None:
+                if _cg_path:
+                    try:
+                        with open(_cg_path / "cgroup.procs", "w") as f:
+                            f.write(str(os.getpid()))
+                    except Exception:
+                        pass
 
         preexec_fn = _preexec
 
@@ -266,7 +269,12 @@ class _PersistentShell:
                 "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
                 "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
                 "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
-                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                # Apply seccomp AFTER mounts (mount syscall needed above)
+                + (
+                    "python3 /tmp/.adl_seccomp.py 2>/dev/null || true\n"
+                    if self._seccomp else ""
+                )
+                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
         self._write_input(init_script.encode())
@@ -685,6 +693,10 @@ class Sandbox:
         if config.working_dir and config.working_dir != "/":
             wd = self._rootfs / config.working_dir.lstrip("/")
             wd.mkdir(parents=True, exist_ok=True)
+
+        # Write seccomp helper into rootfs (called from init_script inside chroot)
+        if config.seccomp:
+            self._write_seccomp_helper()
 
         self._shell = self._detect_shell()
         self._cached_env = self._build_env()
@@ -1109,6 +1121,27 @@ class Sandbox:
     # ------------------------------------------------------------------ #
     #  Filesystem -- overlayfs                                             #
     # ------------------------------------------------------------------ #
+
+    def _write_seccomp_helper(self) -> None:
+        """Write a self-contained seccomp helper script into the rootfs.
+
+        Called from the init_script inside the chroot (after mounts are done).
+        Uses the security module's apply_seccomp_filter via a copy of the source.
+        """
+        import inspect
+        from agentdocker_lite import security
+
+        src = inspect.getsource(security)
+        helper = (
+            "#!/usr/bin/env python3\n"
+            "# Auto-generated seccomp helper — applied inside sandbox chroot\n"
+            + src
+            + "\napply_seccomp_filter()\n"
+        )
+        target = self._rootfs / "tmp" / ".adl_seccomp.py"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(helper)
+        target.chmod(0o755)
 
     def _setup_overlay(self):
         for d in (self._upper_dir, self._work_dir, self._rootfs):

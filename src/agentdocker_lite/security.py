@@ -226,9 +226,11 @@ def apply_seccomp_filter() -> bool:
     insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))  # reload syscall nr
 
     # --- 5. Simple blocklist ---
+    # Each check: if match → jump to EPERM (at end), else fall through to next check
+    # EPERM is at: remaining_checks + 1 (skip remaining checks + ALLOW)
     for i, nr in enumerate(syscall_nrs):
-        remaining = len(syscall_nrs) - i - 1
-        insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, remaining, 0))
+        jump_to_eperm = len(syscall_nrs) - i  # skip remaining checks + ALLOW stmt
+        insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, jump_to_eperm, 0))
 
     # --- 6. Default: allow ---
     insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
