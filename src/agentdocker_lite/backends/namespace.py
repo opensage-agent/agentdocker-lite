@@ -119,6 +119,7 @@ class NamespaceSandbox(SandboxBase):
 
         t2 = time.monotonic()
         self._apply_config_volumes()
+        self._apply_config_devices()
         vol_ms = (time.monotonic() - t2) * 1000
 
         if config.working_dir and config.working_dir != "/":
@@ -188,6 +189,7 @@ class NamespaceSandbox(SandboxBase):
             self._reset_overlayfs()
 
         self._apply_config_volumes()
+        self._apply_config_devices()
 
         if self._config.working_dir and self._config.working_dir != "/":
             wd = self._rootfs / self._config.working_dir.lstrip("/")
@@ -464,6 +466,38 @@ class NamespaceSandbox(SandboxBase):
     # ------------------------------------------------------------------ #
     #  Volume management                                                   #
     # ------------------------------------------------------------------ #
+
+    def _apply_config_devices(self):
+        for device_path in self._config.devices:
+            if not os.path.exists(device_path):
+                logger.warning("Device not found on host, skipping: %s", device_path)
+                continue
+            target = self._rootfs / device_path.lstrip("/")
+            if target in self._bind_mounts:
+                continue  # already mounted (e.g. after reset)
+            self._bind_mount_device(device_path)
+
+    def _bind_mount_device(self, host_path: str):
+        target = self._rootfs / host_path.lstrip("/")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Device files need a file target, not a directory
+        if not target.exists():
+            target.touch()
+
+        result = subprocess.run(
+            ["mount", "--bind", host_path, str(target)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to bind mount device %s: %s",
+                host_path, result.stderr.strip(),
+            )
+            return
+
+        self._bind_mounts.append(target)
+        logger.debug("Bind mounted device %s", host_path)
 
     def _apply_config_volumes(self):
         for spec in self._config.volumes:

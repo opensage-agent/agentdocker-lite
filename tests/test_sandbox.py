@@ -414,3 +414,67 @@ class TestNetIsolate:
         # Should see more than just loopback
         lines = output.strip().split("\n")
         assert len(lines) > 1
+
+
+# ------------------------------------------------------------------ #
+#  Device passthrough                                                  #
+# ------------------------------------------------------------------ #
+
+
+class TestDevicePassthrough:
+    def test_dev_null_accessible(self, tmp_path):
+        """/dev/null bind-mounted into sandbox and functional."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            devices=["/dev/null"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="dev-null-test")
+        try:
+            output, ec = sb.run("echo hello > /dev/null && echo ok")
+            assert ec == 0
+            assert "ok" in output
+        finally:
+            sb.delete()
+
+    def test_nonexistent_device_skipped(self, tmp_path):
+        """Non-existent device path is skipped without error."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            devices=["/dev/nonexistent_device_xyz"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="dev-skip-test")
+        try:
+            output, ec = sb.run("echo ok")
+            assert ec == 0
+            assert "ok" in output
+        finally:
+            sb.delete()
+
+    def test_no_duplicate_bind_mounts_after_reset(self, tmp_path):
+        """Reset should not accumulate duplicate entries in _bind_mounts."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            devices=["/dev/null"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="dev-reset-test")
+        try:
+            count_before = sb._bind_mounts.count(sb.rootfs / "dev/null")
+            sb.reset()
+            count_after = sb._bind_mounts.count(sb.rootfs / "dev/null")
+            assert count_before == count_after, (
+                f"_bind_mounts grew after reset: {count_before} -> {count_after}"
+            )
+        finally:
+            sb.delete()
