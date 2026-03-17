@@ -86,7 +86,8 @@ class _PersistentShell:
             # User namespace mode: setup script handles mount/chroot,
             # stdin is used for phase 2 init (post-chroot).
             unshare_cmd: list[str] = [
-                "unshare", "--user", "--map-root-user", "--pid", "--mount",
+                "unshare", "--user", "--map-root-user",
+                "--pid", "--mount", "--uts", "--ipc",
             ]
             if self._net_isolate:
                 unshare_cmd.append("--net")
@@ -103,7 +104,7 @@ class _PersistentShell:
                 cmd = unshare_cmd
         else:
             # Rootful mode: direct chroot via unshare.
-            cmd = ["unshare", "--pid", "--mount"]
+            cmd = ["unshare", "--pid", "--mount", "--uts", "--ipc"]
             if self._net_isolate:
                 cmd.append("--net")
             cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
