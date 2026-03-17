@@ -20,7 +20,7 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 
 ### Other distros (Arch, Fedora, etc.)
 
-No extra configuration needed — unprivileged user namespaces are enabled by default.
+No extra configuration needed.
 
 ## Basic usage
 
@@ -28,43 +28,24 @@ No extra configuration needed — unprivileged user namespaces are enabled by de
 from agentdocker_lite import Sandbox, SandboxConfig
 
 config = SandboxConfig(
-    image="ubuntu:22.04",          # Docker image or path to rootfs dir
+    image="ubuntu:22.04",
     working_dir="/workspace",
 )
 sb = Sandbox(config, name="worker-0")
 
-# Run commands (~42ms each via persistent shell)
 output, ec = sb.run("echo hello world")
 print(output)  # "hello world\n"
 
-# File I/O (direct rootfs access, bypasses shell)
 sb.write_file("/workspace/payload.py", "print('hello')")
 content = sb.read_file("/workspace/payload.py")
 
-# Reset filesystem to initial state (~27ms, clears overlayfs upper)
-sb.reset()
-
-# Cleanup
-sb.delete()
+sb.reset()   # instant filesystem reset (~12ms)
+sb.delete()  # full cleanup
 ```
 
-No `sudo` required. The sandbox automatically uses **user namespaces** for full isolation (overlayfs, PID namespace, chroot) without root privileges. When running as root, direct mount/cgroup operations are used instead.
-
-## How it works
-
-| | As root | Without root (default) |
-|---|---|---|
-| Isolation | PID + mount namespace + chroot | Same (via `unshare --user`) |
-| Filesystem | overlayfs (direct mount) | overlayfs (inside user namespace) |
-| `reset()` | clears overlayfs upper (~27ms) | same |
-| Resource limits | direct cgroup v2 writes | systemd delegation (`systemd-run --scope`) |
-| Device passthrough | yes (`/dev/kvm` etc.) | not available |
-| `popen()` | nsenter + chroot | `os.setns()` + chroot |
-| Kernel requirement | overlayfs | 5.11+ (overlayfs in userns) |
+No `sudo` required. The sandbox automatically uses user namespaces for full isolation (overlayfs, PID/UTS/IPC namespace, chroot) without root.
 
 ## Volumes
-
-Three mount modes:
 
 ```python
 config = SandboxConfig(
@@ -77,30 +58,24 @@ config = SandboxConfig(
 )
 ```
 
-`cow` mode lets the sandbox freely modify files without touching the host filesystem — writes go to an overlayfs upper layer that gets discarded on `reset()` or `delete()`.
+`cow` mode lets the sandbox modify files without touching the host — writes go to an overlayfs upper layer, discarded on `reset()` or `delete()`.
 
-## Background processes
-
-```python
-# Start a long-running process
-handle = sb.run_background("python3 -m http.server 8080")
-
-# Check if still running
-output, running = sb.check_background(handle)
-
-# Stop it
-sb.stop_background(handle)
-```
-
-## Interactive processes (stdio pipes)
+## Interactive processes (popen)
 
 ```python
-# Launch a process with stdin/stdout pipes (e.g. LSP server)
 proc = sb.popen("pyright --stdio")
 proc.stdin.write(b'{"jsonrpc":"2.0",...}\n')
 proc.stdin.flush()
 response = proc.stdout.readline()
 proc.terminate()
+```
+
+## Background processes
+
+```python
+handle = sb.run_background("python3 -m http.server 8080")
+output, running = sb.check_background(handle)
+sb.stop_background(handle)
 ```
 
 ## Resource limits (cgroup v2)
@@ -110,108 +85,108 @@ config = SandboxConfig(
     image="ubuntu:22.04",
     cpu_max="50000 100000",    # 50% of one CPU
     memory_max="536870912",    # 512MB
-    pids_max="256",            # max 256 processes
+    pids_max="256",
+    io_max="/dev/sda 10485760",  # 10MB/s write limit
 )
 ```
 
-Without root, resource limits are applied via `systemd-run --user --scope` (requires systemd 244+). With root, direct cgroup v2 writes are used.
+Without root: applied via `systemd-run --user --scope`. With root: direct cgroup v2 writes.
 
-## Concurrent sandboxes
-
-All sandboxes share the same base rootfs (read-only lowerdir). Each gets its own overlayfs upper, PID namespace, and mount namespace.
-
-```python
-sandboxes = []
-for i in range(32):
-    config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
-    sb = Sandbox(config, name=f"worker-{i}")
-    sandboxes.append(sb)
-
-# Run in parallel — fully isolated from each other
-for sb in sandboxes:
-    sb.run("apt-get update")  # writes only to this sandbox's upper layer
-
-# Reset all
-for sb in sandboxes:
-    sb.reset()
-
-# Cleanup
-for sb in sandboxes:
-    sb.delete()
-```
-
-## Security hardening
-
-### seccomp-bpf (enabled by default)
-
-Blocks 30+ dangerous syscalls inside the sandbox: ptrace, mount, kexec, bpf, unshare, setns, init_module, reboot, perf_event_open, etc. Also blocks `clone()` with namespace flags and `ioctl(TIOCSTI)` terminal injection.
+## Container configuration
 
 ```python
 config = SandboxConfig(
     image="ubuntu:22.04",
-    seccomp=True,  # default
+    working_dir="/workspace",
+    environment={"KEY": "value"},
+    hostname="worker-0",              # custom hostname (UTS namespace)
+    dns=["8.8.8.8", "1.1.1.1"],      # custom DNS servers
+    read_only=True,                   # read-only rootfs (/dev, /proc, volumes still writable)
+    net_isolate=True,                 # loopback only, no host network
 )
 ```
 
+## Security hardening
+
+### seccomp-bpf (default: on)
+
+Blocks 30+ dangerous syscalls: ptrace, mount, kexec, bpf, unshare, setns, etc.
+
 ### Landlock (filesystem + network restrictions)
 
-Restrict which paths the sandbox can read/write, and which TCP ports it can connect to. ABI version auto-detected at runtime — features degrade gracefully on older kernels.
-
-Supported: filesystem (5.13+), cross-dir rename (5.19+), truncate (6.2+), network (6.7+), ioctl (6.10+), IPC scoping (6.12+), audit logging (6.15+).
+ABI auto-detected at runtime. Supports: filesystem (5.13+), network (6.7+), IPC scoping (6.12+), audit (6.15+).
 
 ```python
 config = SandboxConfig(
     image="ubuntu:22.04",
     landlock_read=["/usr", "/lib", "/etc"],
     landlock_write=["/tmp", "/workspace"],
-    landlock_tcp_ports=[80, 443, 8080],
-)
-```
-
-### Network isolation
-
-```python
-config = SandboxConfig(
-    image="ubuntu:22.04",
-    net_isolate=True,  # loopback only, no host network
+    landlock_tcp_ports=[80, 443],
 )
 ```
 
 ### Device passthrough (root only)
 
 ```python
-config = SandboxConfig(
-    image="ubuntu:22.04",
-    devices=["/dev/kvm"],  # KVM passthrough for QEMU
-)
+config = SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"])
+```
+
+## Concurrent sandboxes
+
+All sandboxes share the same base rootfs. Each gets its own overlayfs upper and namespace.
+
+```python
+sandboxes = [Sandbox(SandboxConfig(image="ubuntu:22.04", working_dir="/workspace"),
+                     name=f"worker-{i}") for i in range(32)]
+for sb in sandboxes:
+    sb.run("echo isolated")
+    sb.reset()
+    sb.delete()
 ```
 
 ## Crash recovery
 
-If a process crashes without calling `delete()`, sandboxes leak mounts and cgroups. Clean them up with:
-
-```bash
-python -m agentdocker_lite cleanup
-```
-
-For RL training loops, call this at the start of each training run:
+Sandboxes auto-cleanup on process exit via `atexit`. For `kill -9` scenarios:
 
 ```python
 from agentdocker_lite import SandboxBase
-SandboxBase.cleanup_stale()  # clean orphans from previous crashes
+SandboxBase.cleanup_stale()
 ```
 
-## Performance comparison
+## Performance
 
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
-| Create | ~271ms | ~10ms | **27x** |
-| Per command (avg) | ~22ms | ~11ms | **2x** |
-| Reset | ~504ms | ~11ms | **45x** |
-| Delete | ~104ms | ~2ms | **52x** |
+| Create | 383ms | 12ms | **31x** |
+| Per command | 19ms | 11ms | **1.8x** |
+| Reset | 558ms | 12ms | **46x** |
+| Delete | 209ms | 1.2ms | **174x** |
 
-Measured on ubuntu:22.04 with 20 commands, rootfs pre-cached. Reproduce with:
+No root required. Reproduce: `python examples/benchmark.py`
 
-```bash
-python examples/benchmark.py
-```
+## Docker migration cheatsheet
+
+| Docker | agentdocker-lite |
+|---|---|
+| `docker run -d ubuntu:22.04` | `sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))` |
+| `docker exec <id> echo hello` | `sb.run("echo hello")` |
+| `docker exec -it <id> bash` | `proc = sb.popen("bash")` |
+| `docker cp file.txt <id>:/path` | `sb.copy_to("file.txt", "/path")` |
+| `docker cp <id>:/path file.txt` | `sb.copy_from("/path", "file.txt")` |
+| `docker rm -f <id> && docker run -d ...` | `sb.reset()` |
+| `docker rm -f <id>` | `sb.delete()` |
+| `-v /host:/container:ro` | `volumes=["/host:/container:ro"]` |
+| `-v /host:/container:rw` | `volumes=["/host:/container:rw"]` |
+| *(no equivalent)* | `volumes=["/host:/container:cow"]` |
+| `--memory 512m` | `memory_max="536870912"` |
+| `--cpus 0.5` | `cpu_max="50000 100000"` |
+| `--pids-limit 256` | `pids_max="256"` |
+| `--device-write-bps /dev/sda:10mb` | `io_max="/dev/sda 10485760"` |
+| `--hostname worker-0` | `hostname="worker-0"` |
+| `--dns 8.8.8.8` | `dns=["8.8.8.8"]` |
+| `--read-only` | `read_only=True` |
+| `--network none` | `net_isolate=True` |
+| `-e KEY=value` | `environment={"KEY": "value"}` |
+| `--device /dev/kvm` | `devices=["/dev/kvm"]` (root only) |
+| `--security-opt seccomp=...` | `seccomp=True` (default) |
+| *(no equivalent)* | `landlock_read=[...], landlock_tcp_ports=[...]` |
