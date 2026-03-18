@@ -303,8 +303,19 @@ class CheckpointManager:
         if track_mem:
             opts.track_mem = True
 
-        # External mounts.
-        for mnt in ["/proc", "/dev"]:
+        # External mounts: /proc, /dev, and all user-configured volumes.
+        # Following runc: register every non-rootfs mount as external so
+        # CRIU doesn't try to dump/restore them (they're managed by us).
+        ext_mounts = ["/proc", "/dev"]
+        for bind_path in getattr(self._sandbox, "_bind_mounts", []):
+            # Convert host path to container-relative path.
+            try:
+                rel = "/" + str(bind_path.relative_to(rootfs))
+            except ValueError:
+                rel = str(bind_path)
+            ext_mounts.append(rel)
+
+        for mnt in ext_mounts:
             ext = opts.ext_mnt.add()
             ext.key = mnt
             ext.val = mnt
@@ -431,8 +442,16 @@ class CheckpointManager:
         opts.rst_sibling = True
         opts.orphan_pts_master = True
 
-        # External mounts.
-        for mnt in ["/proc", "/dev"]:
+        # External mounts (must match dump registration).
+        ext_mounts = ["/proc", "/dev"]
+        for bind_path in getattr(self._sandbox, "_bind_mounts", []):
+            try:
+                rel = "/" + str(bind_path.relative_to(rootfs))
+            except ValueError:
+                rel = str(bind_path)
+            ext_mounts.append(rel)
+
+        for mnt in ext_mounts:
             ext = opts.ext_mnt.add()
             ext.key = mnt
             ext.val = mnt
