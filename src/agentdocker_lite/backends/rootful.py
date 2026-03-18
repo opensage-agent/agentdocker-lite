@@ -132,10 +132,6 @@ class RootfulSandbox(SandboxBase):
         if config.dns:
             self._write_dns(config.dns)
 
-        # Write seccomp helper into rootfs (called from init_script inside chroot)
-        if config.seccomp:
-            self._write_seccomp_helper()
-
         # Read-only rootfs: bind-mount on itself then remount ro
         if config.read_only:
             subprocess.run(
@@ -297,10 +293,6 @@ class RootfulSandbox(SandboxBase):
                 "Run as root to enable device passthrough."
             )
 
-        # --- seccomp helper in upper dir ----------------------------------
-        if config.seccomp:
-            self._write_seccomp_helper_userns()
-
         # --- DNS ----------------------------------------------------------
         if config.dns:
             self._write_dns(config.dns)
@@ -461,24 +453,6 @@ class RootfulSandbox(SandboxBase):
         script_path.chmod(0o755)
         return script_path
 
-    def _write_seccomp_helper_userns(self) -> None:
-        """Write seccomp helper to upper_dir (visible inside chroot via overlay)."""
-        import inspect
-        from agentdocker_lite import security
-
-        src = inspect.getsource(security)
-        helper = (
-            "#!/usr/bin/env python3\n"
-            "# Auto-generated security helper\n"
-            + src
-            + "\ndrop_capabilities()\n"
-            + "apply_seccomp_filter()\n"
-        )
-        target = self._upper_dir / "tmp" / ".adl_seccomp.py"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(helper)
-        target.chmod(0o755)
-
     @staticmethod
     def _check_prerequisites_userns() -> None:
         """Check user namespace prerequisites."""
@@ -537,9 +511,6 @@ class RootfulSandbox(SandboxBase):
                 wd = self._upper_dir / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
-            # Re-write seccomp helper to upper
-            if self._config.seccomp:
-                self._write_seccomp_helper_userns()
         else:
             self._unmount_binds()
             if self._fs_backend == "btrfs":
@@ -686,55 +657,6 @@ class RootfulSandbox(SandboxBase):
                 )
 
     # ------------------------------------------------------------------ #
-    #  Filesystem -- seccomp helper                                        #
-    # ------------------------------------------------------------------ #
-
-    def _write_seccomp_helper(self) -> None:
-        """Write a self-contained seccomp helper script into the rootfs.
-
-        Called from the init_script inside the chroot (after mounts are done).
-        Uses the security module's apply_seccomp_filter via a copy of the source.
-
-        Also checks whether any python interpreter exists in the rootfs and
-        logs a warning if none is found (seccomp will be silently skipped at
-        runtime in that case).
-        """
-        import inspect
-        from agentdocker_lite import security
-
-        src = inspect.getsource(security)
-        helper = (
-            "#!/usr/bin/env python3\n"
-            "# Auto-generated security helper — applied inside sandbox chroot\n"
-            + src
-            + "\ndrop_capabilities()\n"
-            + "apply_seccomp_filter()\n"
-        )
-        target = self._rootfs / "tmp" / ".adl_seccomp.py"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(helper)
-        target.chmod(0o755)
-
-        # Check if any python interpreter exists in rootfs
-        python_candidates = [
-            "python3", "python3.13", "python3.12", "python3.11", "python3.10", "python",
-        ]
-        found = False
-        for py in python_candidates:
-            for bin_dir in ("usr/bin", "usr/local/bin", "bin"):
-                if (self._rootfs / bin_dir / py).exists():
-                    found = True
-                    break
-            if found:
-                break
-        if not found:
-            logger.warning(
-                "No python interpreter found in rootfs %s — seccomp filter "
-                "will NOT be applied inside the sandbox. Install python3 in "
-                "the Docker image to enable seccomp hardening.",
-                self._rootfs,
-            )
-
     def _write_dns(self, dns_servers: list[str]) -> None:
         """Write custom /etc/resolv.conf into the sandbox rootfs."""
         resolv = self._host_path_write("/etc/resolv.conf")
