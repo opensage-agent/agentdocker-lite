@@ -60,6 +60,8 @@ def main():
     handle = sb.run_background("sleep 100")
     output, running = sb.check_background(handle)
     print(f"Background: running={running}")
+    all_procs = sb.list_background()
+    print(f"All background: {all_procs}")
     sb.stop_background(handle)
     print("Background process stopped")
 

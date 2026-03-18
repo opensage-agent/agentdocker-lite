@@ -77,6 +77,7 @@ proc.terminate()
 ```python
 handle = sb.run_background("python3 -m http.server 8080")
 output, running = sb.check_background(handle)
+all_procs = sb.list_background()  # {"handle": {"pid": "123", "running": True}}
 sb.stop_background(handle)
 ```
 

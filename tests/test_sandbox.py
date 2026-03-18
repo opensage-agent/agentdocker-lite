@@ -361,7 +361,17 @@ class TestBackground:
         final = sandbox.stop_background(handle)
         assert isinstance(final, str)
         # Process should be dead now
-        assert handle not in sandbox._bg_handles
+        assert handle not in sandbox.list_background()
+
+    def test_list_background(self, sandbox):
+        h1 = sandbox.run_background("sleep 60")
+        h2 = sandbox.run_background("sleep 60")
+        time.sleep(0.3)
+        procs = sandbox.list_background()
+        assert h1 in procs and procs[h1]["running"]
+        assert h2 in procs and procs[h2]["running"]
+        sandbox.stop_background(h1)
+        sandbox.stop_background(h2)
 
     def test_run_while_background(self, sandbox):
         """Regular run() should work while a background process is active."""
@@ -375,7 +385,7 @@ class TestBackground:
     def test_reset_clears_background(self, sandbox):
         handle = sandbox.run_background("sleep 60")
         sandbox.reset()
-        assert handle not in sandbox._bg_handles
+        assert handle not in sandbox.list_background()
 
 
 # ------------------------------------------------------------------ #
