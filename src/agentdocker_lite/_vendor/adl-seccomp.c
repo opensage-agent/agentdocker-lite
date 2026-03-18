@@ -1,124 +1,170 @@
 /*
- * Security + init helper for agentdocker-lite sandboxes.
- * Runs AFTER pivot_root, BEFORE the shell starts.
- * Being statically linked, it works in any rootfs without glibc.
+ * Minimal security + init helper for agentdocker-lite sandboxes.
+ * Zero libc dependency — raw syscalls only. ~13KB stripped.
  *
- * 1. Mount /proc and /dev (with device nodes)
- * 2. Drop non-essential capabilities
- * 3. Mask sensitive paths
- * 4. Make kernel paths read-only
- * 5. Apply seccomp BPF filter
- * 6. exec argv[1..]
- *
- * Build: gcc -static -Os -o adl-seccomp adl-seccomp.c && strip adl-seccomp
+ * Build: gcc -static -nostdlib -Os -march=x86-64 -fno-stack-protector \
+ *            -o adl-seccomp adl-seccomp.c && strip adl-seccomp
  */
-#include <fcntl.h>
-#include <linux/filter.h>
-#include <linux/seccomp.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/mount.h>
-#include <sys/prctl.h>
-#include <sys/stat.h>
-#include <sys/sysmacros.h>
-#include <unistd.h>
 
-#define PR_CAPBSET_DROP 24
-#define CAP_LAST_CAP 41
+/* ---- Raw syscall wrappers (x86_64) ---- */
 
-static const int keep_caps[] = {
-    0, 1, 3, 4, 5, 6, 7, 8, 10, 18, 27, 29, 31, -1
-};
-
-static const char *masked_paths[] = {
-    "/proc/kcore", "/proc/keys", "/proc/timer_list",
-    "/proc/sched_debug", "/sys/firmware", "/proc/scsi", NULL
-};
-
-static const char *readonly_paths[] = {
-    "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys",
-    "/proc/sysrq-trigger", NULL
-};
-
-static int should_keep(int cap) {
-    for (int i = 0; keep_caps[i] >= 0; i++)
-        if (keep_caps[i] == cap) return 1;
-    return 0;
+static long sc1(long nr, long a) {
+    long r; __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a):"rcx","r11","memory"); return r;
+}
+static long sc2(long nr, long a, long b) {
+    long r; __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a),"S"(b):"rcx","r11","memory"); return r;
+}
+static long sc3(long nr, long a, long b, long c) {
+    long r; __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a),"S"(b),"d"(c):"rcx","r11","memory"); return r;
+}
+static long sc5(long nr, long a, long b, long c, long d, long e) {
+    long r;
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a),"S"(b),"d"(c),"r"(r10),"r"(r8):"rcx","r11","memory");
+    return r;
 }
 
-int main(int argc, char **argv) {
+/* Syscall numbers (x86_64) */
+#define NR_read    0
+#define NR_write   1
+#define NR_open    2
+#define NR_close   3
+#define NR_stat    4
+#define NR_lseek   8
+#define NR_mmap    9
+#define NR_munmap  11
+#define NR_unlink  87
+#define NR_mkdir   83
+#define NR_symlink 88
+#define NR_mknod   133
+#define NR_prctl   157
+#define NR_mount   165
+#define NR_execve  59
+#define NR_exit    60
+
+/* Constants */
+#define MS_RDONLY  1
+#define MS_NOSUID  2
+#define MS_BIND    4096
+#define MS_REMOUNT 32
+#define S_IFCHR    0020000
+#define S_IFDIR    0040000
+#define MKDEV(a,b) (((a)<<8)|(b))
+
+#define PR_CAPBSET_DROP     24
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_SET_SECCOMP      22
+#define SECCOMP_MODE_FILTER 2
+
+/* Minimal stat (only need st_mode at offset 24 on x86_64) */
+struct kstat { char pad[24]; unsigned int st_mode; char rest[120]; };
+
+/* BPF filter header */
+struct bpf_prog { unsigned short len; void *filter; };
+
+/* ---- Helpers ---- */
+
+static int slen(const char *s) { int n=0; while(s[n])n++; return n; }
+
+static void writes(const char *s) { sc3(NR_write, 2, (long)s, slen(s)); }
+
+/* ---- Security logic ---- */
+
+static const int keep_caps[] = {0,1,3,4,5,6,7,8,10,18,27,29,31,-1};
+static const char *masked[] = {
+    "/proc/kcore","/proc/keys","/proc/timer_list",
+    "/proc/sched_debug","/sys/firmware","/proc/scsi",0
+};
+static const char *ro_paths[] = {
+    "/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger",0
+};
+
+static int keep(int c) { for(int i=0;keep_caps[i]>=0;i++) if(keep_caps[i]==c) return 1; return 0; }
+
+/* ---- Entry point ---- */
+
+__attribute__((used))
+static void _main(long argc, char **argv, char **envp) {
     if (argc < 2) {
-        fprintf(stderr, "usage: adl-seccomp PROGRAM [ARGS...]\n");
-        return 1;
+        writes("usage: adl-seccomp PROGRAM [ARGS...]\n");
+        sc1(NR_exit, 1);
     }
 
-    /* 1. Mount /proc and /dev (after pivot_root, before seccomp blocks mount) */
-    mkdir("/proc", 0755);
-    mount("proc", "/proc", "proc", 0, NULL);
+    /* 1. Mount /proc + /dev */
+    sc2(NR_mkdir, (long)"/proc", 0755);
+    sc5(NR_mount, (long)"proc", (long)"/proc", (long)"proc", 0, 0);
 
-    mkdir("/dev", 0755);
-    mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755");
-    mknod("/dev/null", S_IFCHR | 0666, makedev(1, 3));
-    mknod("/dev/zero", S_IFCHR | 0666, makedev(1, 5));
-    mknod("/dev/full", S_IFCHR | 0666, makedev(1, 7));
-    mknod("/dev/random", S_IFCHR | 0444, makedev(1, 8));
-    mknod("/dev/urandom", S_IFCHR | 0444, makedev(1, 9));
-    mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
-    symlink("/proc/self/fd", "/dev/fd");
-    symlink("/proc/self/fd/0", "/dev/stdin");
-    symlink("/proc/self/fd/1", "/dev/stdout");
-    symlink("/proc/self/fd/2", "/dev/stderr");
-    mkdir("/dev/pts", 0755);
-    mkdir("/dev/shm", 1777);
+    sc2(NR_mkdir, (long)"/dev", 0755);
+    sc5(NR_mount, (long)"tmpfs", (long)"/dev", (long)"tmpfs", MS_NOSUID, (long)"mode=0755");
+    sc3(NR_mknod, (long)"/dev/null",    S_IFCHR|0666, MKDEV(1,3));
+    sc3(NR_mknod, (long)"/dev/zero",    S_IFCHR|0666, MKDEV(1,5));
+    sc3(NR_mknod, (long)"/dev/full",    S_IFCHR|0666, MKDEV(1,7));
+    sc3(NR_mknod, (long)"/dev/random",  S_IFCHR|0444, MKDEV(1,8));
+    sc3(NR_mknod, (long)"/dev/urandom", S_IFCHR|0444, MKDEV(1,9));
+    sc3(NR_mknod, (long)"/dev/tty",     S_IFCHR|0666, MKDEV(5,0));
+    sc2(NR_symlink, (long)"/proc/self/fd",   (long)"/dev/fd");
+    sc2(NR_symlink, (long)"/proc/self/fd/0", (long)"/dev/stdin");
+    sc2(NR_symlink, (long)"/proc/self/fd/1", (long)"/dev/stdout");
+    sc2(NR_symlink, (long)"/proc/self/fd/2", (long)"/dev/stderr");
+    sc2(NR_mkdir, (long)"/dev/pts", 0755);
+    sc2(NR_mkdir, (long)"/dev/shm", 01777);
 
     /* 2. Drop capabilities */
-    for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
-        if (!should_keep(cap))
-            prctl(PR_CAPBSET_DROP, cap, 0, 0, 0);
-    }
+    for (int c = 0; c <= 41; c++)
+        if (!keep(c)) sc5(NR_prctl, PR_CAPBSET_DROP, c, 0, 0, 0);
 
-    /* 3. Mask sensitive paths (requires /dev/null from step 1) */
-    for (int i = 0; masked_paths[i]; i++) {
-        struct stat st;
-        if (stat(masked_paths[i], &st) != 0)
-            continue;
-        if (S_ISDIR(st.st_mode))
-            mount("tmpfs", masked_paths[i], "tmpfs", 0, NULL);
+    /* 3. Mask paths */
+    for (int i = 0; masked[i]; i++) {
+        struct kstat st;
+        if (sc2(NR_stat, (long)masked[i], (long)&st) != 0) continue;
+        if ((st.st_mode & S_IFDIR) == S_IFDIR)
+            sc5(NR_mount, (long)"tmpfs", (long)masked[i], (long)"tmpfs", 0, 0);
         else
-            mount("/dev/null", masked_paths[i], NULL, MS_BIND, NULL);
+            sc5(NR_mount, (long)"/dev/null", (long)masked[i], 0, MS_BIND, 0);
     }
 
     /* 4. Read-only paths */
-    for (int i = 0; readonly_paths[i]; i++) {
-        if (mount(readonly_paths[i], readonly_paths[i], NULL, MS_BIND, NULL) == 0)
-            mount(NULL, readonly_paths[i], NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL);
+    for (int i = 0; ro_paths[i]; i++) {
+        if (sc5(NR_mount, (long)ro_paths[i], (long)ro_paths[i], 0, MS_BIND, 0) == 0)
+            sc5(NR_mount, 0, (long)ro_paths[i], 0, MS_BIND|MS_REMOUNT|MS_RDONLY, 0);
     }
 
-    /* 5. Apply seccomp BPF from file */
-    int fd = open("/tmp/.adl_seccomp.bpf", O_RDONLY);
+    /* 5. Seccomp BPF from /tmp/.adl_seccomp.bpf */
+    int fd = sc2(NR_open, (long)"/tmp/.adl_seccomp.bpf", 0/*O_RDONLY*/);
     if (fd >= 0) {
-        off_t size = lseek(fd, 0, SEEK_END);
-        lseek(fd, 0, SEEK_SET);
-
-        if (size > 0 && size % sizeof(struct sock_filter) == 0) {
-            struct sock_filter *prog = malloc(size);
-            if (prog && read(fd, prog, size) == size) {
-                struct sock_fprog fprog = {
-                    .len = size / sizeof(struct sock_filter),
-                    .filter = prog,
-                };
-                prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &fprog);
-                free(prog);
+        long sz = sc3(NR_lseek, fd, 0, 2/*SEEK_END*/);
+        sc3(NR_lseek, fd, 0, 0/*SEEK_SET*/);
+        if (sz > 0) {
+            void *buf = (void*)sc5(NR_mmap, 0, sz, 1/*PROT_READ*/, 2/*MAP_PRIVATE*/, fd);
+            if ((long)buf > 0) {
+                struct bpf_prog p = { sz/8, buf };
+                sc5(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                sc3(NR_prctl, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, (long)&p);
+                sc2(NR_munmap, (long)buf, sz);
             }
         }
-        close(fd);
-        unlink("/tmp/.adl_seccomp.bpf");
+        sc1(NR_close, fd);
+        sc1(NR_unlink, (long)"/tmp/.adl_seccomp.bpf");
     }
 
-    /* 6. exec target — seccomp inherited across exec */
-    execvp(argv[1], argv + 1);
-    perror("exec");
-    return 127;
+    /* 6. exec target */
+    sc3(NR_execve, (long)argv[1], (long)(argv+1), (long)envp);
+    writes("adl-seccomp: exec failed\n");
+    sc1(NR_exit, 127);
 }
+
+/* ASM entry: extract argc/argv/envp from stack, call _main */
+__asm__(
+    ".globl _start\n"
+    "_start:\n"
+    "  xorl %ebp, %ebp\n"
+    "  movq (%rsp), %rdi\n"          /* argc */
+    "  leaq 8(%rsp), %rsi\n"         /* argv */
+    "  leaq 8(%rsp,%rdi,8), %rdx\n"  /* &argv[argc] */
+    "  addq $8, %rdx\n"              /* envp = skip NULL terminator */
+    "  andq $-16, %rsp\n"            /* align stack */
+    "  call _main\n"
+    "  movl $60, %eax\n"
+    "  syscall\n"
+);
