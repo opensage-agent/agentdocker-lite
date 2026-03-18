@@ -136,7 +136,9 @@ class _PersistentShell:
             if self._seccomp:
                 self._prepare_seccomp_helper()
 
-            # Do all mounts BEFORE pivot_root (host tools available).
+            # Mount /proc and /dev BEFORE pivot_root (host tools available).
+            # Mask/readonly paths are done by adl-seccomp (after pivot_root,
+            # before seccomp blocks mount).
             rootfs = shlex.quote(str(self._rootfs))
             pre_pivot_mounts = (
                 f"mount -t proc proc {rootfs}/proc 2>/dev/null; "
@@ -153,17 +155,6 @@ class _PersistentShell:
                 f"ln -sf /proc/self/fd/2 {rootfs}/dev/stderr 2>/dev/null; "
                 f"mkdir -p {rootfs}/dev/pts {rootfs}/dev/shm 2>/dev/null; "
             )
-            # Mask + readonly paths (also before pivot_root).
-            for p in _DEFAULT_MASKED_PATHS:
-                pre_pivot_mounts += (
-                    f"if [ -d {rootfs}{p} ]; then mount -t tmpfs tmpfs {rootfs}{p} 2>/dev/null; "
-                    f"elif [ -e {rootfs}{p} ]; then mount --bind /dev/null {rootfs}{p} 2>/dev/null; fi; "
-                )
-            for p in _DEFAULT_READONLY_PATHS:
-                pre_pivot_mounts += (
-                    f"mount --bind {rootfs}{p} {rootfs}{p} 2>/dev/null && "
-                    f"mount -o remount,ro,bind {rootfs}{p} 2>/dev/null; "
-                )
             if self._hostname:
                 pre_pivot_mounts += (
                     f"hostname {shlex.quote(self._hostname)} 2>/dev/null; "
