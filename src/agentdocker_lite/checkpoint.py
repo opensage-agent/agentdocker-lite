@@ -430,10 +430,21 @@ class CheckpointManager:
             os.set_inheritable(fd, True)
 
         # 4. Build CRIU restore options.
+        #    The "criu-root" bind mount trick from runc: CRIU requires
+        #    --root to be a mount point whose parent is NOT overmounted.
+        #    We bind-mount the rootfs to a temporary directory to
+        #    guarantee this invariant regardless of the host layout.
         rootfs = self._sandbox._rootfs
+        env_dir = getattr(self._sandbox, "_env_dir", None)
+        criu_root = Path(str(env_dir or rootfs.parent)) / "criu-root"
+        criu_root.mkdir(exist_ok=True)
+        subprocess.run(
+            ["mount", "--rbind", str(rootfs), str(criu_root)],
+            capture_output=True, check=True,
+        )
         opts = rpc.criu_opts()
         opts.images_dir_fd = os.open(str(criu_dir), os.O_DIRECTORY)
-        opts.root = str(rootfs)
+        opts.root = str(criu_root)
         opts.log_file = "restore.log"
         opts.log_level = 4
         opts.shell_job = True
@@ -493,6 +504,16 @@ class CheckpointManager:
                [stdin_r, stdin_w, stdout_r, stdout_w, stderr_w])),
         ]
 
+        def _cleanup_criu_root():
+            subprocess.run(
+                ["umount", "-l", str(criu_root)],
+                capture_output=True,
+            )
+            try:
+                criu_root.rmdir()
+            except OSError:
+                pass
+
         try:
             resp = self._rpc.restore(opts)
         except Exception:
@@ -503,9 +524,12 @@ class CheckpointManager:
                     except OSError:
                         pass
             os.close(opts.images_dir_fd)
+            _cleanup_criu_root()
             raise
         finally:
             os.close(opts.images_dir_fd)
+
+        _cleanup_criu_root()
 
         if not resp.success:
             for fd in all_cleanup_fds:
