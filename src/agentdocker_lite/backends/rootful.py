@@ -715,6 +715,19 @@ class RootfulSandbox(SandboxBase):
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to mount overlayfs: {result.stderr.strip()}")
+
+        # Make overlay mount private to prevent mount propagation.
+        # On systemd systems, / is shared by default.  Mounts created
+        # under a shared parent inherit shared propagation, which means
+        # mount events inside a child namespace that still has shared
+        # peers could propagate back to the host and corrupt /dev, etc.
+        # Making the overlay mount itself private prevents this.
+        # (See runc rootfsParentMountPrivate + bind-mount-self pattern.)
+        subprocess.run(
+            ["mount", "--make-private", str(self._rootfs)],
+            capture_output=True,
+        )
+
         self._overlay_mounted = True
         logger.debug("Mounted overlayfs at %s", self._rootfs)
 

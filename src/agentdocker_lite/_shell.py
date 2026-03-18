@@ -93,7 +93,8 @@ class _PersistentShell:
             # stdin is used for phase 2 init (post-chroot).
             unshare_cmd: list[str] = [
                 "unshare", "--user", "--map-root-user",
-                "--pid", "--mount", "--uts", "--ipc",
+                "--pid", "--mount", "--propagation", "slave",
+                "--uts", "--ipc",
             ]
             if self._net_isolate:
                 unshare_cmd.append("--net")
@@ -113,7 +114,8 @@ class _PersistentShell:
             # pivot_root changes the mount namespace root, unlike chroot
             # which only changes the process root.  CRIU requires these
             # to match for checkpoint/restore to work.
-            cmd = ["unshare", "--pid", "--mount", "--uts", "--ipc"]
+            cmd = ["unshare", "--pid", "--mount", "--propagation", "slave",
+                   "--uts", "--ipc"]
             # Time namespace for CRIU monotonic clock continuity.
             self._timens = os.path.exists("/proc/self/ns/time")
             if self._timens:
@@ -141,8 +143,21 @@ class _PersistentShell:
 
             seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
 
+            # Mount isolation (defense in depth — runc approach):
+            # 1. mount --make-rslave / : allows host->child propagation
+            #    but blocks child->host propagation.  Safer than rprivate
+            #    which can race with concurrent mount events.
+            #    (see runc prepareRoot: MS_SLAVE|MS_REC)
+            # 2. mount --bind rootfs rootfs : self-bind creates a new
+            #    mount point with controllable propagation, independent
+            #    of the parent mount's shared subtrees.  Also ensures
+            #    rootfs is a mount point (required by pivot_root).
+            # 3. mount --make-private rootfs : ensure the rootfs mount
+            #    itself cannot propagate in either direction.
+            # 4. After pivot_root, /.pivot_old cleanup is done by
+            #    _cleanup_pivot_old (rslave + umount via setns).
             pivot_script = (
-                "mount --make-rprivate / && "
+                "mount --make-rslave / && "
                 + hostname_cmd
                 + f"cd {rootfs_q} && "
                 "mkdir -p .pivot_old && "
@@ -299,9 +314,14 @@ class _PersistentShell:
         """Unmount /.pivot_old inside the shell's mount namespace.
 
         After pivot_root, the old host root and all its submounts remain
-        visible at /.pivot_old.  We clean them up via the umount2 syscall
-        (MNT_DETACH) from a forked child that enters the mount namespace.
-        This avoids needing mount/umount binaries in the rootfs.
+        visible at /.pivot_old.  We clean them up from the host side by
+        entering the mount namespace via setns.
+
+        Critical safety steps (following runc pivotRoot pattern):
+        1. setns into the container mount namespace
+        2. Make /.pivot_old rslave (MS_SLAVE|MS_REC) so that the
+           subsequent unmount does NOT propagate to the host
+        3. umount2(/.pivot_old, MNT_DETACH)
         """
         if self._process is None:
             return
@@ -324,27 +344,42 @@ class _PersistentShell:
         import ctypes.util
 
         MNT_DETACH = 2
+        MS_SLAVE = 1 << 19        # 0x80000
+        MS_REC = 1 << 14          # 0x4000
         CLONE_NEWNS = 0x00020000
 
         libc_name = ctypes.util.find_library("c")
         if not libc_name:
             return
         libc = ctypes.CDLL(libc_name, use_errno=True)
+        # Set mount() arg/return types for safe ctypes calls.
+        libc.mount.argtypes = [
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+            ctypes.c_ulong, ctypes.c_char_p,
+        ]
+        libc.mount.restype = ctypes.c_int
 
         child_pid = os.fork()
         if child_pid == 0:
             # Child: enter mount namespace, chroot to target root,
-            # then unmount the old host root.
+            # then make old root rslave and unmount it.
             try:
                 mnt_fd = os.open(mnt_ns, os.O_RDONLY)
                 root_fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
-                libc.setns(mnt_fd, CLONE_NEWNS)
+                rc = libc.setns(mnt_fd, CLONE_NEWNS)
                 os.close(mnt_fd)
+                if rc != 0:
+                    # setns failed -- do NOT proceed in host namespace.
+                    os.close(root_fd)
+                    os._exit(1)
                 # Align our root with the mount namespace root.
                 os.fchdir(root_fd)
                 os.chroot(".")
                 os.close(root_fd)
                 os.chdir("/")
+                # Make old root rslave to prevent unmount propagation
+                # to the host (runc approach: MS_SLAVE|MS_REC).
+                libc.mount(b"", b"/.pivot_old", None, MS_SLAVE | MS_REC, None)
                 libc.umount2(b"/.pivot_old", MNT_DETACH)
             except Exception:
                 pass
