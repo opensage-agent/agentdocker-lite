@@ -401,30 +401,34 @@ class SandboxBase(abc.ABC):
         """Delete the sandbox and clean up all resources."""
         ...
 
-    def snapshot(self, path: str) -> None:
+    def fs_snapshot(self, path: str) -> None:
         """Save current filesystem state to a directory.
 
         Copies the overlayfs upper layer (all changes since creation/reset)
-        to *path*.  Use :meth:`restore` to return to this state later.
-        Does not capture running process state (use CRIU for that).
+        to *path*.  Use :meth:`fs_restore` to return to this state later.
+        Does not capture running process state — use
+        :class:`~agentdocker_lite.CheckpointManager` for full process
+        checkpoint/restore.
 
         Args:
             path: Directory to save the snapshot to (must not exist).
         """
         upper = getattr(self, "_upper_dir", None)
         if not upper or not upper.exists():
-            raise RuntimeError("snapshot() requires overlayfs (not available in this mode)")
+            raise RuntimeError("fs_snapshot() requires overlayfs (not available in this mode)")
         shutil.copytree(str(upper), path)
-        logger.debug("Snapshot saved: %s -> %s", upper, path)
+        logger.debug("FS snapshot saved: %s -> %s", upper, path)
 
-    def restore(self, path: str) -> None:
+    def fs_restore(self, path: str) -> None:
         """Restore filesystem state from a snapshot.
 
         Kills the persistent shell, replaces the overlayfs upper layer
-        with the snapshot, and restarts the shell.
+        with the snapshot, and restarts the shell.  Running process state
+        is lost — use :class:`~agentdocker_lite.CheckpointManager` for
+        full process checkpoint/restore.
 
         Args:
-            path: Directory containing a previous :meth:`snapshot`.
+            path: Directory containing a previous :meth:`fs_snapshot`.
         """
         upper = getattr(self, "_upper_dir", None)
         if not upper:

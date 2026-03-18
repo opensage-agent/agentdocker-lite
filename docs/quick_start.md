@@ -113,10 +113,10 @@ Save and restore sandbox filesystem state:
 
 ```python
 sb.run("echo v1 > /workspace/data.txt")
-sb.snapshot("/tmp/checkpoint_v1")    # save current state
+sb.fs_snapshot("/tmp/checkpoint_v1")    # save current state
 
 sb.run("echo v2 > /workspace/data.txt")
-sb.restore("/tmp/checkpoint_v1")     # restore to v1
+sb.fs_restore("/tmp/checkpoint_v1")     # restore to v1
 
 sb.reset()                           # back to clean image (not snapshot)
 ```
@@ -162,7 +162,7 @@ if CheckpointManager.check_available():
     mgr = CheckpointManager(sb)
 else:
     print("CRIU not available, falling back to filesystem-only snapshots")
-    # sb.snapshot() / sb.restore() still works for filesystem state
+    # sb.fs_snapshot() / sb.fs_restore() still works for filesystem state
 ```
 
 ## Container configuration
@@ -281,8 +281,8 @@ No root required (except CRIU checkpoint). Reproduce: `python examples/benchmark
 | `--read-only` | `read_only=True` |
 | `--network none` | `net_isolate=True` |
 | `-p 8080:80` | `net_isolate=True, port_map=["8080:80"]` |
-| `docker commit` / `docker save` | `sb.snapshot("/path")` (filesystem only) |
-| `docker import` / `docker load` | `sb.restore("/path")` (filesystem only) |
+| `docker commit` / `docker save` | `sb.fs_snapshot("/path")` (filesystem only) |
+| `docker import` / `docker load` | `sb.fs_restore("/path")` (filesystem only) |
 | `docker checkpoint create` (CRIU) | `CheckpointManager(sb).save("/path")` (full process state) |
 | `docker start --checkpoint` | `CheckpointManager(sb).restore("/path")` |
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |

@@ -257,7 +257,7 @@ class CheckpointManager:
         criu_dir.mkdir()
 
         # 1. Save filesystem state.
-        self._sandbox.snapshot(str(fs_dir))
+        self._sandbox.fs_snapshot(str(fs_dir))
 
         # 2. Identify target process.
         shell = self._sandbox._persistent_shell
