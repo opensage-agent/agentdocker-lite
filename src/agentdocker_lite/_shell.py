@@ -105,13 +105,32 @@ class _PersistentShell:
             else:
                 cmd = unshare_cmd
         else:
-            # Rootful mode: direct chroot via unshare.
+            # Rootful mode: pivot_root into rootfs (CRIU-compatible).
+            # pivot_root changes the mount namespace root, unlike chroot
+            # which only changes the process root.  CRIU requires these
+            # to match for checkpoint/restore to work.
             cmd = ["unshare", "--pid", "--mount", "--uts", "--ipc"]
             if self._net_isolate:
                 cmd.append("--net")
-            cmd.extend(["--fork", "chroot", str(self._rootfs), self._shell])
+            shell_exec = self._shell
             if "bash" in self._shell:
-                cmd.extend(["--norc", "--noprofile"])
+                shell_exec += " --norc --noprofile"
+            # pivot_root makes root == mntns root (CRIU-compatible).
+            # We cannot unmount old root from the script because the
+            # rootfs may lack mount/umount and host tools fail due to
+            # glibc version mismatch.  The old root is cleaned up via
+            # _cleanup_pivot_old() using ctypes syscalls after start.
+            pivot_script = (
+                "mount --make-rprivate / && "
+                f"cd {shlex.quote(str(self._rootfs))} && "
+                "mkdir -p .pivot_old && "
+                "pivot_root . .pivot_old && "
+                "cd / && "
+                # setsid makes the shell a session leader within its
+                # PID namespace (required for CRIU checkpoint).
+                f"exec setsid {shell_exec}"
+            )
+            cmd.extend(["--fork", "bash", "-c", pivot_script])
 
         # Build preexec_fn
         _cg_path = self._cgroup_path
@@ -237,6 +256,10 @@ class _PersistentShell:
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
+        # Clean up old root mounts left by pivot_root (rootful mode only).
+        if not self._userns:
+            self._cleanup_pivot_old()
+
         ns_flags = "user,pid,mount" if self._userns else "pid,mount"
         if self._net_isolate:
             ns_flags += ",net"
@@ -247,6 +270,64 @@ class _PersistentShell:
             ns_flags,
             self._tty,
         )
+
+    def _cleanup_pivot_old(self) -> None:
+        """Unmount /.pivot_old inside the shell's mount namespace.
+
+        After pivot_root, the old host root and all its submounts remain
+        visible at /.pivot_old.  We clean them up via the umount2 syscall
+        (MNT_DETACH) from a forked child that enters the mount namespace.
+        This avoids needing mount/umount binaries in the rootfs.
+        """
+        if self._process is None:
+            return
+
+        # Find the init process (PID 1 inside the namespace).
+        pid = self._process.pid
+        children_file = f"/proc/{pid}/task/{pid}/children"
+        try:
+            children = open(children_file).read().strip().split()
+            init_pid = int(children[0]) if children else pid
+        except (OSError, ValueError):
+            init_pid = pid
+
+        mnt_ns = f"/proc/{init_pid}/ns/mnt"
+        root_path = f"/proc/{init_pid}/root"
+        if not os.path.exists(mnt_ns):
+            return
+
+        import ctypes
+        import ctypes.util
+
+        MNT_DETACH = 2
+        CLONE_NEWNS = 0x00020000
+
+        libc_name = ctypes.util.find_library("c")
+        if not libc_name:
+            return
+        libc = ctypes.CDLL(libc_name, use_errno=True)
+
+        child_pid = os.fork()
+        if child_pid == 0:
+            # Child: enter mount namespace, chroot to target root,
+            # then unmount the old host root.
+            try:
+                mnt_fd = os.open(mnt_ns, os.O_RDONLY)
+                root_fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
+                libc.setns(mnt_fd, CLONE_NEWNS)
+                os.close(mnt_fd)
+                # Align our root with the mount namespace root.
+                os.fchdir(root_fd)
+                os.chroot(".")
+                os.close(root_fd)
+                os.chdir("/")
+                libc.umount2(b"/.pivot_old", MNT_DETACH)
+            except Exception:
+                pass
+            finally:
+                os._exit(0)
+        else:
+            os.waitpid(child_pid, 0)
 
     def kill(self) -> None:
         """Kill the shell and all processes in its PID namespace."""

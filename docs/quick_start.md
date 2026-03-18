@@ -8,6 +8,8 @@ pip install -e .
 
 Requirements: Linux kernel 5.11+, `util-linux` (`unshare`), Python 3.12+. Docker is only needed for auto-exporting rootfs from image names.
 
+The pip package bundles static binaries for `pasta` (port mapping) and `criu` (process checkpointing) in `site-packages/agentdocker_lite/_vendor/`. No extra install needed.
+
 ### Ubuntu 24.04 / 23.10+ (AppArmor)
 
 Ubuntu defaults to blocking unprivileged user namespaces. Run once to enable:

@@ -8,6 +8,7 @@ version = "0.0.2"
 description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
 requires-python = ">=3.10"
 license = "MIT"
+dependencies = ["protobuf>=4.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0"]
@@ -18,3 +19,4 @@ packages = ["src/agentdocker_lite"]
 [tool.hatch.build.targets.wheel.force-include]
 "src/agentdocker_lite/_vendor/pasta" = "agentdocker_lite/_vendor/pasta"
 "src/agentdocker_lite/_vendor/pasta.avx2" = "agentdocker_lite/_vendor/pasta.avx2"
+"src/agentdocker_lite/_vendor/criu" = "agentdocker_lite/_vendor/criu"
