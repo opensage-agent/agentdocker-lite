@@ -1,15 +1,16 @@
 /*
- * Security helper for agentdocker-lite sandboxes.
- * 1. Drop non-essential capabilities
- * 2. Mask sensitive paths (bind /dev/null over them)
- * 3. Make kernel paths read-only
- * 4. Apply seccomp BPF filter from /tmp/.adl_seccomp.bpf
- * 5. exec argv[1..]
+ * Security + init helper for agentdocker-lite sandboxes.
+ * Runs AFTER pivot_root, BEFORE the shell starts.
+ * Being statically linked, it works in any rootfs without glibc.
  *
- * Runs AFTER pivot_root (so paths are relative to new root) but
- * BEFORE the shell starts — seccomp is inherited across exec.
+ * 1. Mount /proc and /dev (with device nodes)
+ * 2. Drop non-essential capabilities
+ * 3. Mask sensitive paths
+ * 4. Make kernel paths read-only
+ * 5. Apply seccomp BPF filter
+ * 6. exec argv[1..]
  *
- * Build: gcc -static -Os -o adl-seccomp adl_seccomp_helper.c && strip adl-seccomp
+ * Build: gcc -static -Os -o adl-seccomp adl-seccomp.c && strip adl-seccomp
  */
 #include <fcntl.h>
 #include <linux/filter.h>
@@ -20,6 +21,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #define PR_CAPBSET_DROP 24
@@ -51,13 +53,32 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 1. Drop capabilities */
+    /* 1. Mount /proc and /dev (after pivot_root, before seccomp blocks mount) */
+    mkdir("/proc", 0755);
+    mount("proc", "/proc", "proc", 0, NULL);
+
+    mkdir("/dev", 0755);
+    mount("tmpfs", "/dev", "tmpfs", MS_NOSUID, "mode=0755");
+    mknod("/dev/null", S_IFCHR | 0666, makedev(1, 3));
+    mknod("/dev/zero", S_IFCHR | 0666, makedev(1, 5));
+    mknod("/dev/full", S_IFCHR | 0666, makedev(1, 7));
+    mknod("/dev/random", S_IFCHR | 0444, makedev(1, 8));
+    mknod("/dev/urandom", S_IFCHR | 0444, makedev(1, 9));
+    mknod("/dev/tty", S_IFCHR | 0666, makedev(5, 0));
+    symlink("/proc/self/fd", "/dev/fd");
+    symlink("/proc/self/fd/0", "/dev/stdin");
+    symlink("/proc/self/fd/1", "/dev/stdout");
+    symlink("/proc/self/fd/2", "/dev/stderr");
+    mkdir("/dev/pts", 0755);
+    mkdir("/dev/shm", 1777);
+
+    /* 2. Drop capabilities */
     for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
         if (!should_keep(cap))
             prctl(PR_CAPBSET_DROP, cap, 0, 0, 0);
     }
 
-    /* 2. Mask sensitive paths */
+    /* 3. Mask sensitive paths (requires /dev/null from step 1) */
     for (int i = 0; masked_paths[i]; i++) {
         struct stat st;
         if (stat(masked_paths[i], &st) != 0)
@@ -68,13 +89,13 @@ int main(int argc, char **argv) {
             mount("/dev/null", masked_paths[i], NULL, MS_BIND, NULL);
     }
 
-    /* 3. Read-only paths */
+    /* 4. Read-only paths */
     for (int i = 0; readonly_paths[i]; i++) {
         if (mount(readonly_paths[i], readonly_paths[i], NULL, MS_BIND, NULL) == 0)
             mount(NULL, readonly_paths[i], NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL);
     }
 
-    /* 4. Apply seccomp BPF from file */
+    /* 5. Apply seccomp BPF from file */
     int fd = open("/tmp/.adl_seccomp.bpf", O_RDONLY);
     if (fd >= 0) {
         off_t size = lseek(fd, 0, SEEK_END);
@@ -96,7 +117,7 @@ int main(int argc, char **argv) {
         unlink("/tmp/.adl_seccomp.bpf");
     }
 
-    /* 5. exec target */
+    /* 6. exec target — seccomp inherited across exec */
     execvp(argv[1], argv + 1);
     perror("exec");
     return 127;
