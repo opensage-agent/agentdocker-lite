@@ -24,6 +24,14 @@ static long sc5(long nr, long a, long b, long c, long d, long e) {
     __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a),"S"(b),"d"(c),"r"(r10),"r"(r8):"rcx","r11","memory");
     return r;
 }
+static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
+    long r;
+    register long r10 __asm__("r10") = d;
+    register long r8  __asm__("r8")  = e;
+    register long r9  __asm__("r9")  = f;
+    __asm__ volatile("syscall":"=a"(r):"a"(nr),"D"(a),"S"(b),"d"(c),"r"(r10),"r"(r8),"r"(r9):"rcx","r11","memory");
+    return r;
+}
 
 /* Syscall numbers (x86_64) */
 #define NR_read    0
@@ -147,7 +155,7 @@ static void _main(long argc, char **argv, char **envp) {
         long sz = sc3(NR_lseek, fd, 0, 2/*SEEK_END*/);
         sc3(NR_lseek, fd, 0, 0/*SEEK_SET*/);
         if (sz > 0) {
-            void *buf = (void*)sc5(NR_mmap, 0, sz, 1/*PROT_READ*/, 2/*MAP_PRIVATE*/, fd);
+            void *buf = (void*)sc6(NR_mmap, 0, sz, 1/*PROT_READ*/, 2/*MAP_PRIVATE*/, fd, 0/*offset*/);
             if ((long)buf > 0) {
                 struct bpf_prog p = { sz/8, buf };
                 sc5(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);

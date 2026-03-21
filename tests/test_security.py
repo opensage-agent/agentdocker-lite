@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
+from agentdocker_lite import Sandbox, SandboxBase, SandboxConfig
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -91,6 +91,74 @@ class TestSeccomp:
         output, ec = root_sandbox.run("cat /proc/self/status | grep Seccomp")
         assert ec == 0
         assert "2" in output  # Seccomp: 2 = filter mode
+
+    def test_mount_blocked(self, root_sandbox):
+        """mount(2) should be blocked by seccomp."""
+        output, ec = root_sandbox.run("mount -t tmpfs tmpfs /tmp 2>&1")
+        assert ec != 0
+        assert "denied" in output.lower() or "not permitted" in output.lower()
+
+    def test_unshare_blocked(self, root_sandbox):
+        """unshare(2) should be blocked — prevents namespace escape."""
+        output, ec = root_sandbox.run("unshare --pid echo escape 2>&1")
+        assert ec != 0
+
+    def test_clone_ns_flags_blocked(self, root_sandbox):
+        """clone(2) with namespace flags should be blocked."""
+        # nsenter requires clone with CLONE_NEWPID — should fail
+        output, ec = root_sandbox.run("unshare --mount echo test 2>&1")
+        assert ec != 0
+
+    def test_capabilities_dropped(self, root_sandbox):
+        """Non-default capabilities should be dropped."""
+        # CAP_SYS_ADMIN (21) should NOT be in bounding set
+        output, ec = root_sandbox.run("cat /proc/self/status | grep CapBnd")
+        assert ec == 0
+        cap_hex = output.strip().split()[-1]
+        cap_val = int(cap_hex, 16)
+        assert not (cap_val & (1 << 21)), "CAP_SYS_ADMIN should be dropped"
+        # CAP_NET_ADMIN (12) should NOT be in bounding set
+        assert not (cap_val & (1 << 12)), "CAP_NET_ADMIN should be dropped"
+        # CAP_CHOWN (0) should still be present (Docker default)
+        assert cap_val & (1 << 0), "CAP_CHOWN should be kept"
+
+
+# ------------------------------------------------------------------ #
+#  Cleanup                                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestCleanup:
+    """Verify stale resource cleanup."""
+
+    def test_cleanup_stale_no_crash(self, tmp_path):
+        """cleanup_stale() should not crash even with nothing to clean."""
+        _requires_root()
+        SandboxBase.cleanup_stale(str(tmp_path / "envs"))
+
+    def test_cleanup_stale_removes_leftover(self, tmp_path):
+        """cleanup_stale() removes leftover sandbox directories."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="stale-test")
+        env_dir = tmp_path / "envs" / "stale-test"
+        assert env_dir.exists()
+        # Properly delete — this unmounts and kills the process
+        sb.delete()
+        # Recreate env dir with .pid pointing to a dead PID to simulate stale
+        env_dir.mkdir(parents=True, exist_ok=True)
+        (env_dir / ".pid").write_text("999999999")
+        (env_dir / "rootfs").mkdir(exist_ok=True)
+        # cleanup_stale should remove the stale directory
+        cleaned = SandboxBase.cleanup_stale(str(tmp_path / "envs"))
+        assert cleaned >= 1
+        assert not env_dir.exists()
 
 
 # ------------------------------------------------------------------ #

@@ -138,10 +138,11 @@ class _PersistentShell:
             rootfs_q = shlex.quote(str(self._rootfs))
 
             # hostname must be set before seccomp (blocks sethostname).
-            # Write to /proc directly — doesn't require `hostname` binary.
+            # Try /proc write first (no binary needed), fall back to hostname cmd.
             hostname_cmd = ""
             if self._hostname:
-                hostname_cmd = f"echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname; "
+                hn = shlex.quote(self._hostname)
+                hostname_cmd = f"echo {hn} > /proc/sys/kernel/hostname 2>/dev/null || hostname {hn} 2>/dev/null; "
 
             seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
 
@@ -234,7 +235,7 @@ class _PersistentShell:
         # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
         # which runs before the shell starts. Init script only does hostname + cd.
         _hostname_snippet = (
-            f"echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname\n"
+            f"echo {shlex.quote(self._hostname)} > /proc/sys/kernel/hostname 2>/dev/null || hostname {shlex.quote(self._hostname)} 2>/dev/null\n"
             if self._hostname else ""
         )
 

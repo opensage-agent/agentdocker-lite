@@ -1098,6 +1098,16 @@ class TestHostname:
         """hostname= sets the UTS hostname inside the sandbox."""
         _requires_root()
         _requires_docker()
+        # CI containers may have /proc/sys/kernel/hostname read-only and
+        # may lack the hostname binary; skip if neither method works.
+        import subprocess
+        r = subprocess.run(
+            ["unshare", "--uts", "bash", "-c",
+             "echo test > /proc/sys/kernel/hostname 2>/dev/null || hostname test 2>/dev/null"],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            pytest.skip("UTS namespace hostname write not permitted (CI container)")
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
