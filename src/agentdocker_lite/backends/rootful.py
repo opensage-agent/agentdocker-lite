@@ -176,9 +176,7 @@ class RootfulSandbox(SandboxBase):
             tty=config.tty,
             net_isolate=config.net_isolate,
             seccomp=config.seccomp,
-            landlock_read=config.landlock_read,
-            landlock_write=config.landlock_write,
-            landlock_tcp_ports=config.landlock_tcp_ports,
+
             hostname=config.hostname,
             read_only=config.read_only,
         )
@@ -895,35 +893,28 @@ class RootfulSandbox(SandboxBase):
         shell_pid = self._persistent_shell._process.pid
         netns_name = f"adl-{self._name}"
 
-        if os.geteuid() == 0:
-            # Root: bind-mount netns to /run/netns/ (persistent, survives PID exit)
-            netns_path = f"/run/netns/{netns_name}"
-            os.makedirs("/run/netns", exist_ok=True)
-            if os.path.exists(netns_path):
-                subprocess.run(["umount", "-l", netns_path], capture_output=True)
-                try:
-                    os.unlink(netns_path)
-                except OSError:
-                    pass
-            fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
-            os.close(fd)
-            subprocess.run(
-                ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
-                capture_output=True, check=True,
-            )
-            self._netns_path = netns_path
-        else:
-            # Rootless: /run/netns/ requires root; use /proc path directly.
-            # pasta --runas is not needed (already unprivileged).
-            netns_path = f"/proc/{shell_pid}/ns/net"
-            self._netns_path = None  # no bind mount to clean up
+        # Bind-mount netns to /run/netns/ (persistent, survives PID exit).
+        # Rootless pasta is handled in the setup script, not here.
+        netns_path = f"/run/netns/{netns_name}"
+        os.makedirs("/run/netns", exist_ok=True)
+        if os.path.exists(netns_path):
+            subprocess.run(["umount", "-l", netns_path], capture_output=True)
+            try:
+                os.unlink(netns_path)
+            except OSError:
+                pass
+        fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.close(fd)
+        subprocess.run(
+            ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
+            capture_output=True, check=True,
+        )
+        self._netns_path = netns_path
 
         # --- build pasta args (following Podman's createPastaArgs) ------------
-        cmd: list[str] = [pasta_bin, "--config-net"]
-        if os.geteuid() == 0:
-            # Root: pasta drops to nobody by default, losing CAP_SYS_ADMIN
-            # for setns(). --runas 0:0 keeps root (safe: runs in our netns).
-            cmd.extend(["--runas", "0:0"])
+        # --runas 0:0: pasta drops to nobody by default, losing CAP_SYS_ADMIN
+        # for setns(). Keep root (safe: runs in our netns).
+        cmd: list[str] = [pasta_bin, "--config-net", "--runas", "0:0"]
         if not self._config.ipv6:
             cmd.append("--ipv4-only")
 
