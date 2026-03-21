@@ -1296,3 +1296,51 @@ class TestRegistry:
         finally:
             rf._container_cli = orig
 
+
+# ------------------------------------------------------------------ #
+#  Async API                                                            #
+# ------------------------------------------------------------------ #
+
+
+class TestAsyncAPI:
+    def test_arun(self, sandbox):
+        """arun() returns same result as run()."""
+        import asyncio
+        output, ec = asyncio.run(sandbox.arun("echo async-hello"))
+        assert ec == 0
+        assert "async-hello" in output
+
+    def test_areset(self, sandbox):
+        """areset() resets filesystem."""
+        import asyncio
+        sandbox.run("echo data > /workspace/temp.txt")
+        asyncio.run(sandbox.areset())
+        _, ec = sandbox.run("cat /workspace/temp.txt 2>/dev/null")
+        assert ec != 0
+
+    def test_arun_concurrent(self, tmp_path, shared_cache_dir):
+        """Multiple arun() calls can run concurrently on different sandboxes."""
+        import asyncio
+        _requires_root()
+        _requires_docker()
+
+        async def worker(i):
+            config = SandboxConfig(
+                image=TEST_IMAGE,
+                working_dir="/workspace",
+                env_base_dir=str(tmp_path / "envs"),
+                rootfs_cache_dir=shared_cache_dir,
+            )
+            sb = Sandbox(config, name=f"async-{i}")
+            try:
+                out, ec = await sb.arun(f"echo worker-{i}")
+                assert ec == 0
+                assert f"worker-{i}" in out
+            finally:
+                await sb.adelete()
+
+        async def main():
+            await asyncio.gather(*(worker(i) for i in range(4)))
+
+        asyncio.run(main())
+
