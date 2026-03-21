@@ -69,11 +69,6 @@ class SandboxConfig:
             (e.g. ``["/dev/kvm"]``).
         seccomp: Enable seccomp-bpf filter to block dangerous syscalls
             (ptrace, mount, kexec, bpf, etc.). Default ``True``.
-        landlock_read: Paths allowed for read-only access under Landlock.
-            If set, all other paths are denied. ``None`` disables Landlock.
-        landlock_write: Paths allowed for read-write access under Landlock.
-        landlock_tcp_ports: TCP ports allowed for connect under Landlock.
-            ``None`` means no network restriction.
         hostname: Hostname inside the sandbox (UTS namespace).
             ``None`` uses the host's hostname.
         dns: Custom DNS servers (e.g. ``["8.8.8.8", "1.1.1.1"]``).
@@ -109,9 +104,6 @@ class SandboxConfig:
     port_map: Optional[list[str]] = None
     ipv6: bool = False  # pasta IPv4-only by default; localhost works.
     # Set True for IPv6 networking (localhost may fail — use 127.0.0.1).
-    landlock_read: Optional[list[str]] = None
-    landlock_write: Optional[list[str]] = None
-    landlock_tcp_ports: Optional[list[int]] = None
     oom_score_adj: Optional[int] = None
     cpuset_cpus: Optional[str] = None
 

@@ -102,10 +102,6 @@ SandboxConfig(
 
     # Security
     seccomp=True,                   # seccomp-bpf (default: True)
-    landlock_read=["/usr", "/lib"],
-    landlock_write=["/tmp", "/workspace"],
-    landlock_tcp_ports=[80, 443],
-
     # Devices (root only)
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 )
@@ -256,7 +252,6 @@ Reproduce: `sudo python examples/benchmark.py`
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
-| *(no equivalent)* | `landlock_read=[...], landlock_tcp_ports=[...]` |
 
 ## Architecture
 

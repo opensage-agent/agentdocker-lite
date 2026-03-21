@@ -45,9 +45,6 @@ class _PersistentShell:
         tty: bool = False,
         net_isolate: bool = False,
         seccomp: bool = True,
-        landlock_read: Optional[list[str]] = None,
-        landlock_write: Optional[list[str]] = None,
-        landlock_tcp_ports: Optional[list[int]] = None,
         userns_setup_script: Optional[str] = None,
         systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
@@ -62,9 +59,6 @@ class _PersistentShell:
         self._tty = tty
         self._net_isolate = net_isolate
         self._seccomp = seccomp
-        self._landlock_read = landlock_read
-        self._landlock_write = landlock_write
-        self._landlock_tcp_ports = landlock_tcp_ports
         self._userns = userns_setup_script is not None
         self._userns_setup_script = userns_setup_script
         self._systemd_scope_properties = systemd_scope_properties

@@ -281,19 +281,6 @@ All security features are **on by default** with zero runtime overhead.
 - **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
 - **Time namespace**: isolates monotonic/boottime clocks, ensures CRIU restore sees continuous time (kernel 5.6+)
 
-### Landlock (filesystem + network restrictions)
-
-ABI auto-detected at runtime. Supports: filesystem (5.13+), network (6.7+), IPC scoping (6.12+), audit (6.15+).
-
-```python
-config = SandboxConfig(
-    image="ubuntu:22.04",
-    landlock_read=["/usr", "/lib", "/etc"],
-    landlock_write=["/tmp", "/workspace"],
-    landlock_tcp_ports=[80, 443],
-)
-```
-
 ### Device passthrough (root only)
 
 ```python
@@ -397,4 +384,3 @@ sudo python examples/benchmark.py
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 | `--oom-score-adj 500` | `oom_score_adj=500` |
-| *(no equivalent)* | `landlock_read=[...], landlock_tcp_ports=[...]` |
