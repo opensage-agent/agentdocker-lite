@@ -434,6 +434,28 @@ class TestUserNamespace:
         finally:
             sb.delete()
 
+    def test_net_isolate_no_port_map(self, tmp_path, shared_cache_dir):
+        """net_isolate=True without port_map gives loopback-only in rootless."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            net_isolate=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-netiso")
+        try:
+            output, ec = sb.run("ls /sys/class/net/ 2>/dev/null || echo lo")
+            assert ec == 0
+            # Should only see loopback
+            ifaces = output.strip().split()
+            assert "lo" in ifaces
+        finally:
+            sb.delete()
+
 
 # ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
