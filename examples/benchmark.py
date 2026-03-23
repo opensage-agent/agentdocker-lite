@@ -385,6 +385,59 @@ def bench_reset_loop() -> dict:
     }
 
 
+def bench_fast_reset_loop() -> dict:
+    """run → fast_reset 100 times — fast_reset vs default comparison."""
+    from agentdocker_lite import Sandbox, SandboxConfig
+    N = 100
+
+    sb = Sandbox(
+        SandboxConfig(image=IMAGE, working_dir="/workspace", fast_reset=True),
+        name="adl-bench-fast-reset",
+    )
+    t0 = time.monotonic()
+    for i in range(N):
+        sb.run(f"echo episode-{i} > /workspace/state.txt")
+        sb.reset()
+    elapsed = time.monotonic() - t0
+    sb.delete()
+
+    return {
+        "total_s": elapsed,
+        "cycles_per_sec": N / elapsed,
+        "avg_ms": elapsed / N * 1000,
+    }
+
+
+def bench_fast_reset_many_files() -> dict:
+    """Reset with 500 files per episode — shows rename vs rmtree scaling."""
+    from agentdocker_lite import Sandbox, SandboxConfig
+    N = 50
+
+    results = {}
+    for fast_reset in (False, True):
+        label = "fast" if fast_reset else "default"
+        sb = Sandbox(
+            SandboxConfig(
+                image=IMAGE, working_dir="/workspace", fast_reset=fast_reset,
+            ),
+            name=f"adl-bench-fr-{label}",
+        )
+        times = []
+        for i in range(N):
+            sb.run(f"mkdir -p /workspace/data && seq 1 500 | "
+                   f"xargs -I{{}} touch /workspace/data/f_{{}}")
+            t0 = time.monotonic()
+            sb.reset()
+            times.append((time.monotonic() - t0) * 1000)
+        sb.delete()
+        results[label] = {
+            "avg_ms": sum(times) / len(times),
+            "median_ms": sorted(times)[len(times) // 2],
+        }
+
+    return results
+
+
 def bench_checkpoint_loop() -> dict | None:
     """save → run → restore 50 times — simulates partial rollout."""
     import os
@@ -671,6 +724,19 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
         comparisons.append(f"{adl_rl['cycles_per_sec']/podman_rl['cycles_per_sec']:.1f}x vs Podman")
     print(f"  adl:    {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)"
           + (f"  {', '.join(comparisons)}" if comparisons else ""))
+
+    print("\nFast reset loop (100 cycles, fast_reset=True)...")
+    adl_fr = bench_fast_reset_loop()
+    speedup = adl_fr["cycles_per_sec"] / adl_rl["cycles_per_sec"]
+    print(f"  adl default: {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)")
+    print(f"  adl fast:    {adl_fr['cycles_per_sec']:.1f} resets/s  (avg {adl_fr['avg_ms']:.0f}ms)  {speedup:.2f}x")
+
+    print("\nFast reset scaling (500 files/episode, 50 cycles)...")
+    fr_files = bench_fast_reset_many_files()
+    d, f = fr_files["default"], fr_files["fast"]
+    speedup = d["median_ms"] / f["median_ms"] if f["median_ms"] > 0 else float("inf")
+    print(f"  default: {d['median_ms']:.1f}ms median")
+    print(f"  fast:    {f['median_ms']:.1f}ms median  {speedup:.2f}x")
 
     print("\nCheckpoint loop (50 run+restore cycles)...")
     cl = bench_checkpoint_loop()

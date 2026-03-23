@@ -1431,3 +1431,93 @@ class TestAsyncAPI:
 
         asyncio.run(main())
 
+
+# ------------------------------------------------------------------ #
+#  Fast reset                                                          #
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def fast_sandbox(tmp_path, shared_cache_dir):
+    _requires_root()
+    _requires_docker()
+    config = SandboxConfig(
+        image=TEST_IMAGE,
+        working_dir="/workspace",
+        fast_reset=True,
+        env_base_dir=str(tmp_path / "envs"),
+        rootfs_cache_dir=shared_cache_dir,
+    )
+    sb = Sandbox(config, name="fast-reset-test")
+    yield sb
+    sb.delete()
+
+
+class TestFastReset:
+    """Test fast_reset=True: O(1) rename + background delete."""
+
+    def test_clears_files(self, fast_sandbox):
+        fast_sandbox.run("echo hello > /workspace/test.txt")
+        fast_sandbox.reset()
+        _, ec = fast_sandbox.run("cat /workspace/test.txt 2>/dev/null")
+        assert ec != 0
+
+    def test_preserves_base(self, fast_sandbox):
+        fast_sandbox.reset()
+        _, ec = fast_sandbox.run("ls /bin/sh")
+        assert ec == 0
+
+    def test_multiple_resets(self, fast_sandbox):
+        for i in range(5):
+            fast_sandbox.run(f"echo {i} > /workspace/marker_{i}.txt")
+            fast_sandbox.reset()
+            _, ec = fast_sandbox.run(f"test -f /workspace/marker_{i}.txt")
+            assert ec != 0, f"file survived fast reset #{i}"
+            out, ec = fast_sandbox.run(f"echo alive-{i}")
+            assert ec == 0 and f"alive-{i}" in out
+
+    def test_many_files(self, fast_sandbox):
+        fast_sandbox.run(
+            "mkdir -p /workspace/src && seq 1 200 | "
+            "xargs -I{} sh -c 'echo print\\({}\\) > /workspace/src/gen_{}.py'"
+        )
+        fast_sandbox.reset()
+        _, ec = fast_sandbox.run("ls /workspace/src/ 2>/dev/null")
+        assert ec != 0
+
+    def test_restores_deleted_base_file(self, fast_sandbox):
+        fast_sandbox.run("rm -f /bin/ls")
+        _, ec = fast_sandbox.run("ls /bin/ls 2>/dev/null")
+        assert ec != 0
+        fast_sandbox.reset()
+        _, ec = fast_sandbox.run("ls /bin/ls")
+        assert ec == 0
+
+    def test_restores_modified_base_file(self, fast_sandbox):
+        original, _ = fast_sandbox.run("cat /etc/hostname 2>/dev/null || echo __none__")
+        fast_sandbox.run("echo TAMPERED > /etc/hostname")
+        fast_sandbox.reset()
+        restored, _ = fast_sandbox.run("cat /etc/hostname 2>/dev/null || echo __none__")
+        assert restored.strip() == original.strip()
+
+    def test_nested_dirs_and_symlinks(self, fast_sandbox):
+        fast_sandbox.run("mkdir -p /workspace/a/b/c/d/e")
+        fast_sandbox.run("echo deep > /workspace/a/b/c/d/e/file.txt")
+        fast_sandbox.run("ln -s /workspace/a/b/c /workspace/shortcut")
+        fast_sandbox.run("touch '/workspace/file with spaces.txt'")
+        fast_sandbox.reset()
+        _, ec = fast_sandbox.run("test -e /workspace/a")
+        assert ec != 0
+        _, ec = fast_sandbox.run("test -e /workspace/shortcut")
+        assert ec != 0
+
+    def test_latency_not_worse(self, fast_sandbox):
+        """fast_reset should not be slower than 500ms."""
+        times = []
+        for _ in range(5):
+            fast_sandbox.run("seq 1 100 | xargs -I{} touch /workspace/{}")
+            t0 = time.monotonic()
+            fast_sandbox.reset()
+            times.append((time.monotonic() - t0) * 1000)
+        median = sorted(times)[len(times) // 2]
+        assert median < 500, f"Fast reset median {median:.1f}ms > 500ms"
