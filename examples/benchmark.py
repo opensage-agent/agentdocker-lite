@@ -201,9 +201,9 @@ OPENSANDBOX_DOMAIN = "localhost:8080"
 
 def _opensandbox_available() -> bool:
     try:
-        r = subprocess.run(["curl", "-s", f"http://{OPENSANDBOX_DOMAIN}/health"],
-                           capture_output=True, text=True, timeout=3)
-        return "healthy" in r.stdout
+        from urllib.request import urlopen
+        r = urlopen(f"http://{OPENSANDBOX_DOMAIN}/health", timeout=3)
+        return "healthy" in r.read().decode()
     except Exception:
         return False
 
@@ -315,9 +315,10 @@ def bench_opensandbox_reset_loop() -> dict | None:
 
 def _swe_available() -> bool:
     try:
-        import swerex  # noqa: F401
+        from swerex.runtime.sandbox import LocalRuntime  # noqa: F401
+        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction  # noqa: F401
         return True
-    except ImportError:
+    except (ImportError, ModuleNotFoundError):
         return False
 
 
@@ -326,48 +327,45 @@ def bench_swe() -> dict | None:
     if not _swe_available():
         return None
 
-    from swerex.runtime.sandbox import LocalRuntime
-    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+    async def _run():
+        from swerex.runtime.sandbox import LocalRuntime
+        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
 
-    def _create():
-        rt = LocalRuntime()
-        asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
-            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
-        return rt
+        async def _create():
+            rt = LocalRuntime()
+            await rt.create_session(CreateSandboxBashSessionRequest(
+                startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
+            return rt
 
-    def _run_cmd(rt, cmd):
-        return asyncio.run(rt.run_in_session(BashAction(
-            command=cmd, timeout=10, check="silent")))
-
-    def _close(rt):
-        asyncio.run(rt.close())
-
-    # Create
-    t0 = time.monotonic()
-    rt = _create()
-    create_ms = (time.monotonic() - t0) * 1000
-
-    # Per-command latency
-    cmd_times = []
-    for i in range(N_COMMANDS):
+        # Create
         t0 = time.monotonic()
-        _run_cmd(rt, f"echo iteration-{i}")
-        cmd_times.append((time.monotonic() - t0) * 1000)
-    avg_cmd_ms = sum(cmd_times) / len(cmd_times)
+        rt = await _create()
+        create_ms = (time.monotonic() - t0) * 1000
 
-    # "Reset" = close + recreate session
-    t0 = time.monotonic()
-    _close(rt)
-    rt = _create()
-    reset_ms = (time.monotonic() - t0) * 1000
+        # Per-command latency
+        cmd_times = []
+        for i in range(N_COMMANDS):
+            t0 = time.monotonic()
+            await rt.run_in_session(BashAction(
+                command=f"echo iteration-{i}", timeout=10, check="silent"))
+            cmd_times.append((time.monotonic() - t0) * 1000)
+        avg_cmd_ms = sum(cmd_times) / len(cmd_times)
 
-    # Delete
-    t0 = time.monotonic()
-    _close(rt)
-    delete_ms = (time.monotonic() - t0) * 1000
+        # "Reset" = close + recreate session
+        t0 = time.monotonic()
+        await rt.close()
+        rt = await _create()
+        reset_ms = (time.monotonic() - t0) * 1000
 
-    return {"create_ms": create_ms, "cmd_ms": avg_cmd_ms,
-            "reset_ms": reset_ms, "delete_ms": delete_ms}
+        # Delete
+        t0 = time.monotonic()
+        await rt.close()
+        delete_ms = (time.monotonic() - t0) * 1000
+
+        return {"create_ms": create_ms, "cmd_ms": avg_cmd_ms,
+                "reset_ms": reset_ms, "delete_ms": delete_ms}
+
+    return asyncio.run(_run())
 
 
 def bench_swe_throughput() -> dict | None:
@@ -375,21 +373,24 @@ def bench_swe_throughput() -> dict | None:
     if not _swe_available():
         return None
 
-    from swerex.runtime.sandbox import LocalRuntime
-    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+    async def _run():
+        from swerex.runtime.sandbox import LocalRuntime
+        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
 
-    rt = LocalRuntime()
-    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
-        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
-    asyncio.run(rt.run_in_session(BashAction(command="echo warmup", timeout=10, check="silent")))
-    N = 100
-    t0 = time.monotonic()
-    for i in range(N):
-        asyncio.run(rt.run_in_session(BashAction(
-            command=f"echo {i}", timeout=10, check="silent")))
-    elapsed = time.monotonic() - t0
-    asyncio.run(rt.close())
-    return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+        rt = LocalRuntime()
+        await rt.create_session(CreateSandboxBashSessionRequest(
+            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
+        await rt.run_in_session(BashAction(command="echo warmup", timeout=10, check="silent"))
+        N = 100
+        t0 = time.monotonic()
+        for i in range(N):
+            await rt.run_in_session(BashAction(
+                command=f"echo {i}", timeout=10, check="silent"))
+        elapsed = time.monotonic() - t0
+        await rt.close()
+        return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+    return asyncio.run(_run())
 
 
 def bench_swe_reset_loop() -> dict | None:
@@ -397,24 +398,27 @@ def bench_swe_reset_loop() -> dict | None:
     if not _swe_available():
         return None
 
-    from swerex.runtime.sandbox import LocalRuntime
-    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+    async def _run():
+        from swerex.runtime.sandbox import LocalRuntime
+        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
 
-    N = 50
-    rt = LocalRuntime()
-    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
-        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
-    t0_total = time.monotonic()
-    for i in range(N):
-        asyncio.run(rt.run_in_session(BashAction(
-            command=f"echo episode-{i}", timeout=10, check="silent")))
-        asyncio.run(rt.close())
+        N = 50
         rt = LocalRuntime()
-        asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
-            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
-    asyncio.run(rt.close())
-    elapsed = time.monotonic() - t0_total
-    return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+        await rt.create_session(CreateSandboxBashSessionRequest(
+            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
+        t0_total = time.monotonic()
+        for i in range(N):
+            await rt.run_in_session(BashAction(
+                command=f"echo episode-{i}", timeout=10, check="silent"))
+            await rt.close()
+            rt = LocalRuntime()
+            await rt.create_session(CreateSandboxBashSessionRequest(
+                startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
+        await rt.close()
+        elapsed = time.monotonic() - t0_total
+        return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+    return asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------
