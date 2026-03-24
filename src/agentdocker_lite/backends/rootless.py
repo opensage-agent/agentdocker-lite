@@ -118,6 +118,8 @@ class RootlessSandbox(RootfulSandbox):
             "pids_max": config.pids_max,
             "io_max": config.io_max,
             "cpuset_cpus": config.cpuset_cpus,
+            "cpu_shares": config.cpu_shares,
+            "memory_swap": config.memory_swap,
         }
 
         # --- cgroup via systemd delegation --------------------------------
@@ -129,13 +131,15 @@ class RootlessSandbox(RootfulSandbox):
                     "memory_max": "MemoryMax",
                     "pids_max": "TasksMax",
                     "io_max": "IOWriteBandwidthMax",
+                    "cpu_shares": "CPUWeight",
+                    "memory_swap": "MemorySwapMax",
                 }
                 for key, sd_prop in prop_map.items():
                     value = self._cgroup_limits.get(key)
                     if value:
                         if key == "cpu_max":
                             # Convert "50000 100000" → "50%"
-                            parts = value.split()
+                            parts = str(value).split()
                             if len(parts) == 2:
                                 pct = int(int(parts[0]) / int(parts[1]) * 100)
                                 self._systemd_scope_properties.append(f"{sd_prop}={pct}%")
@@ -144,6 +148,10 @@ class RootlessSandbox(RootfulSandbox):
                             # systemd uses "IOWriteBandwidthMax=/dev/X N"
                             # Pass as-is; user must use systemd format
                             self._systemd_scope_properties.append(f"{sd_prop}={value}")
+                        elif key == "cpu_shares":
+                            from agentdocker_lite.backends.base import _convert_cpu_shares
+                            weight = _convert_cpu_shares(int(value))
+                            self._systemd_scope_properties.append(f"{sd_prop}={weight}")
                         else:
                             self._systemd_scope_properties.append(f"{sd_prop}={value}")
                 logger.debug(
@@ -339,6 +347,13 @@ class RootlessSandbox(RootfulSandbox):
             f"ln -sf pts/ptmx {merged}/dev/ptmx 2>/dev/null || true",
         ])
 
+        # /dev/shm as tmpfs (Docker defaults to 64MB)
+        shm_size = self._config.shm_size or str(64 * 1024 * 1024)
+        lines.append(
+            f"mount -t tmpfs -o nosuid,nodev,noexec,size={shm_size} "
+            f"tmpfs {merged}/dev/shm"
+        )
+
         # Custom device passthrough (e.g., /dev/kvm, /dev/fuse)
         # Bind-mount from host devtmpfs preserves the original superblock
         # (no SB_I_NODEV), so the device is usable if the user has the
@@ -391,6 +406,19 @@ class RootlessSandbox(RootfulSandbox):
                 lines.append(f"mount --bind {host_path} {target}")
                 if mode == "ro":
                     lines.append(f"mount -o remount,ro,bind {target}")
+
+        # --- Tmpfs mounts ---
+        if self._config.tmpfs:
+            lines.append("")
+            lines.append("# Tmpfs mounts")
+            for spec in self._config.tmpfs:
+                parts = spec.split(":", 1)
+                path = parts[0]
+                opts = parts[1] if len(parts) > 1 else ""
+                target = f"{merged}/{path.lstrip('/')}"
+                lines.append(f"mkdir -p {target}")
+                mount_opts = f"-o {opts}" if opts else ""
+                lines.append(f"mount -t tmpfs {mount_opts} tmpfs {target}")
 
         # --- Network isolation + pasta (rootless) ---
         # When port_map is set, unshare did NOT create a net namespace.

@@ -188,13 +188,9 @@ class TestParseCompose:
             services:
               app:
                 image: myapp
-                ulimits:
-                  nofile:
-                    soft: 65536
-                    hard: 65536
-                shm_size: "2g"
+                cgroup_parent: /custom
         """))
-        with pytest.raises(ValueError, match="unsupported.*ulimits"):
+        with pytest.raises(ValueError, match="unsupported.*cgroup_parent"):
             _parse_compose(compose, {})
 
     def test_port_protocol_stripped(self, tmp_path):

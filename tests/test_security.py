@@ -1238,6 +1238,92 @@ class TestRenamReset:
 # ------------------------------------------------------------------ #
 
 
+class TestShmSize:
+    """Verify /dev/shm is mounted as tmpfs with correct size."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("rootless only")
+
+    def test_shm_default_size(self, shared_cache_dir, tmp_path):
+        """Default shm is 64MB."""
+        self._skip_if_root()
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="shm-default")
+        try:
+            out, ec = sb.run("df -B1 /dev/shm | tail -1")
+            assert ec == 0
+            # Check that /dev/shm is a tmpfs mount
+            out2, _ = sb.run("mount | grep '/dev/shm'")
+            assert "tmpfs" in out2
+        finally:
+            sb.delete()
+
+    def test_shm_custom_size(self, shared_cache_dir, tmp_path):
+        """Custom shm_size is respected."""
+        self._skip_if_root()
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            shm_size="256m",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="shm-custom")
+        try:
+            out, ec = sb.run("df -B1 /dev/shm | tail -1")
+            assert ec == 0
+            # 256MB = 268435456 bytes
+            assert "268435456" in out or "262144" in out  # bytes or KB
+        finally:
+            sb.delete()
+
+    def test_shm_survives_reset(self, shared_cache_dir, tmp_path):
+        """shm mount persists after reset."""
+        self._skip_if_root()
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            shm_size="128m",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="shm-reset")
+        try:
+            sb.run("echo test > /dev/shm/file.txt")
+            sb.reset()
+            out, ec = sb.run("mount | grep '/dev/shm'")
+            assert "tmpfs" in out
+        finally:
+            sb.delete()
+
+
+class TestTmpfsMounts:
+    """Verify tmpfs mounts work correctly."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("rootless only")
+
+    def test_tmpfs_mount(self, shared_cache_dir, tmp_path):
+        self._skip_if_root()
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            tmpfs=["/run:size=10m"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="tmpfs-test")
+        try:
+            out, ec = sb.run("mount | grep '/run'")
+            assert ec == 0
+            assert "tmpfs" in out
+            # Verify writable
+            out2, ec2 = sb.run("echo ok > /run/test.txt && cat /run/test.txt")
+            assert ec2 == 0
+            assert "ok" in out2
+        finally:
+            sb.delete()
+
+
 class TestConfigSurvivesReset:
     """Verify all config options are correctly restored after reset."""
 

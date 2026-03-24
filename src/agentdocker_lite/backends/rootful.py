@@ -112,6 +112,8 @@ class RootfulSandbox(SandboxBase):
             "pids_max": config.pids_max,
             "io_max": config.io_max,
             "cpuset_cpus": config.cpuset_cpus,
+            "cpu_shares": config.cpu_shares,
+            "memory_swap": config.memory_swap,
         }
 
         # --- setup --------------------------------------------------------
@@ -758,7 +760,9 @@ class RootfulSandbox(SandboxBase):
             if subtree_ctl.exists():
                 for key, ctrl in [
                     ("cpu_max", "cpu"),
+                    ("cpu_shares", "cpu"),
                     ("memory_max", "memory"),
+                    ("memory_swap", "memory"),
                     ("pids_max", "pids"),
                     ("io_max", "io"),
                     ("cpuset_cpus", "cpuset"),
@@ -779,10 +783,15 @@ class RootfulSandbox(SandboxBase):
             "pids_max": "pids.max",
             "io_max": "io.max",
             "cpuset_cpus": "cpuset.cpus",
+            "cpu_shares": "cpu.weight",
+            "memory_swap": "memory.swap.max",
         }
         for key, filename in limit_files.items():
             value = self._cgroup_limits.get(key)
             if value:
+                if key == "cpu_shares":
+                    from agentdocker_lite.backends.base import _convert_cpu_shares
+                    value = str(_convert_cpu_shares(int(value)))
                 try:
                     (self._cgroup_path / filename).write_text(str(value))
                     logger.debug("cgroup %s = %s", filename, value)

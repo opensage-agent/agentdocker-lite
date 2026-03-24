@@ -144,10 +144,14 @@ SandboxConfig(
     # Resource limits (cgroup v2)
     cpu_max="0.5",                  # 50% of one CPU (also: "2" for 2 cores, "50%")
     memory_max="512m",              # 512MB (also accepts "2g", "536870912")
+    memory_swap="1g",               # total memory+swap (Docker semantics)
     pids_max="256",
+    cpu_shares=1024,                # relative CPU weight (Docker --cpu-shares)
     io_max="/dev/sda 10mb",         # 10MB/s write limit (also: "rbps=5mb wbps=10mb")
     cpuset_cpus="0-3",              # Pin to CPU 0-3
     oom_score_adj=500,              # Prefer killing sandbox over host
+    shm_size="256m",                # /dev/shm size (default 64m)
+    tmpfs=["/run:size=100m"],       # additional tmpfs mounts
 
     # Networking
     net_isolate=True,               # Loopback only (or use port_map for NAT)

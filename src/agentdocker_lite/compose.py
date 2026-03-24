@@ -102,6 +102,11 @@ class _Service:
     # maps resource name → (soft, hard), e.g. {"nofile": (65535, 65535)}
     networks: list[str] = field(default_factory=list)
     # compose networks this service belongs to (empty → "default")
+    shm_size: Optional[str] = None
+    tmpfs: list[str] = field(default_factory=list)
+    cpu_shares: Optional[int] = None
+    mem_limit: Optional[str] = None
+    memswap_limit: Optional[str] = None
 
 
 def _parse_environment(raw: Any) -> dict[str, str]:
@@ -169,13 +174,35 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "volumes", "ports", "devices", "depends_on", "healthcheck",
     "network_mode", "dns", "hostname", "working_dir", "restart",
     "security_opt", "cap_add", "privileged", "stop_grace_period",
-    "ulimits",
+    "ulimits", "shm_size", "tmpfs", "cpu_shares",
+    "mem_limit", "memswap_limit", "env_file",
     # Parsed but not mapped (informational / ignored safely)
     "container_name", "profiles", "stdin_open", "tty",
-    "env_file", "extra_hosts", "labels", "logging",
+    "extra_hosts", "labels", "logging",
     # Not needed: host networking replaces custom networks
     "networks",
 })
+
+
+def _parse_env_file(filepath: Path) -> dict[str, str]:
+    """Parse a Docker-style env file into a dict."""
+    env: dict[str, str] = {}
+    if not filepath.exists():
+        logger.warning("env_file not found: %s", filepath)
+        return env
+    for line in filepath.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, _, v = line.partition("=")
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            env[k.strip()] = v
+        else:
+            env[line] = os.environ.get(line, "")
+    return env
 
 
 def _parse_compose(
@@ -208,6 +235,22 @@ def _parse_compose(
                 f"Supported: {', '.join(sorted(_SUPPORTED_SERVICE_KEYS))}"
             )
 
+        # Resolve env_file: load from file(s), then override with explicit env
+        env_from_file: dict[str, str] = {}
+        raw_env_file = svc.get("env_file")
+        if raw_env_file:
+            if isinstance(raw_env_file, str):
+                raw_env_file = [raw_env_file]
+            for ef in raw_env_file:
+                env_from_file.update(_parse_env_file(compose_file.parent / ef))
+        merged_env = {**env_from_file, **_parse_environment(svc.get("environment"))}
+
+        # Parse tmpfs: can be string or list
+        raw_tmpfs = svc.get("tmpfs")
+        if isinstance(raw_tmpfs, str):
+            raw_tmpfs = [raw_tmpfs]
+        tmpfs_list = [str(t) for t in (raw_tmpfs or [])]
+
         services[name] = _Service(
             name=name,
             image=svc.get("image"),
@@ -216,7 +259,7 @@ def _parse_compose(
             ),
             command=svc.get("command"),
             entrypoint=svc.get("entrypoint"),
-            environment=_parse_environment(svc.get("environment")),
+            environment=merged_env,
             volumes=[str(v) for v in (svc.get("volumes") or [])],
             ports=_parse_ports(svc.get("ports")),
             devices=[str(d) for d in (svc.get("devices") or [])],
@@ -233,6 +276,11 @@ def _parse_compose(
             stop_grace_period=svc.get("stop_grace_period"),
             ulimits=_parse_ulimits(svc.get("ulimits")),
             networks=list(svc["networks"]) if isinstance(svc.get("networks"), (list, dict)) else [],
+            shm_size=svc.get("shm_size"),
+            tmpfs=tmpfs_list,
+            cpu_shares=int(svc["cpu_shares"]) if svc.get("cpu_shares") else None,
+            mem_limit=svc.get("mem_limit"),
+            memswap_limit=svc.get("memswap_limit"),
         )
 
     return services, named_volumes
@@ -668,6 +716,16 @@ class ComposeProject:
             hostname=svc.hostname or svc.name,
             dns=svc.dns,
         )
+        if svc.shm_size:
+            config_kwargs["shm_size"] = svc.shm_size
+        if svc.tmpfs:
+            config_kwargs["tmpfs"] = svc.tmpfs
+        if svc.cpu_shares:
+            config_kwargs["cpu_shares"] = svc.cpu_shares
+        if svc.mem_limit:
+            config_kwargs["memory_max"] = svc.mem_limit
+        if svc.memswap_limit:
+            config_kwargs["memory_swap"] = svc.memswap_limit
         if self._env_base_dir:
             config_kwargs["env_base_dir"] = self._env_base_dir
         if self._rootfs_cache_dir:

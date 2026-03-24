@@ -1319,6 +1319,92 @@ class TestParseIoMax:
         assert cfg.io_max == "259:0 wbps=10485760"
 
 
+class TestCpuShares:
+    """Unit tests for _convert_cpu_shares."""
+
+    def test_default_1024(self):
+        from agentdocker_lite.backends.base import _convert_cpu_shares
+        # Docker 1024 → cgroup v2 weight ~39 (formula: 1 + (1022*9999)/262142)
+        assert 1 <= _convert_cpu_shares(1024) <= 10000
+
+    def test_minimum(self):
+        from agentdocker_lite.backends.base import _convert_cpu_shares
+        assert _convert_cpu_shares(2) >= 1
+
+    def test_maximum(self):
+        from agentdocker_lite.backends.base import _convert_cpu_shares
+        assert _convert_cpu_shares(262144) == 10000
+
+    def test_from_docker(self):
+        cfg = SandboxConfig.from_docker("img", cpu_shares=512)
+        assert cfg.cpu_shares == 512
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run("docker run --cpu-shares=2048 ubuntu")
+        assert cfg.cpu_shares == 2048
+
+
+class TestShmSize:
+    """Unit tests for shm_size parsing."""
+
+    def test_parse_human_readable(self):
+        cfg = SandboxConfig(image="x", shm_size="256m")
+        assert cfg.shm_size == str(256 * 1024**2)
+
+    def test_from_docker(self):
+        cfg = SandboxConfig.from_docker("img", shm_size="2g")
+        assert cfg.shm_size == str(2 * 1024**3)
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run("docker run --shm-size=512m ubuntu")
+        assert cfg.shm_size == str(512 * 1024**2)
+
+
+class TestMemorySwap:
+    """Unit tests for memory_swap Docker→cgroup v2 conversion."""
+
+    def test_unlimited(self):
+        cfg = SandboxConfig(image="x", memory_swap="-1")
+        assert cfg.memory_swap == "max"
+
+    def test_docker_semantics(self):
+        """memory_swap=1g with memory_max=512m → swap=512m."""
+        cfg = SandboxConfig(image="x", memory_max="512m", memory_swap="1g")
+        expected_swap = 1024**3 - 512 * 1024**2
+        assert cfg.memory_swap == str(expected_swap)
+
+    def test_from_docker(self):
+        cfg = SandboxConfig.from_docker("img", mem_limit="512m", memswap_limit="1g")
+        expected_swap = 1024**3 - 512 * 1024**2
+        assert cfg.memory_swap == str(expected_swap)
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run -m 512m --memory-swap=1g ubuntu"
+        )
+        expected_swap = 1024**3 - 512 * 1024**2
+        assert cfg.memory_swap == str(expected_swap)
+
+
+class TestTmpfs:
+    """Unit tests for tmpfs parsing."""
+
+    def test_from_docker_dict(self):
+        cfg = SandboxConfig.from_docker("img", tmpfs={"/run": "size=100m"})
+        assert cfg.tmpfs == ["/run:size=100m"]
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --tmpfs /run:size=100m --tmpfs /tmp ubuntu"
+        )
+        assert "/run:size=100m" in cfg.tmpfs
+        assert "/tmp" in cfg.tmpfs
+
+    def test_config_direct(self):
+        cfg = SandboxConfig(image="x", tmpfs=["/run:size=50m"])
+        assert cfg.tmpfs == ["/run:size=50m"]
+
+
 class TestApplyImageDefaults:
     """Unit tests for _apply_image_defaults (image config backfill)."""
 

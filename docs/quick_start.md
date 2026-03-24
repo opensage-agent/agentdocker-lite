@@ -93,10 +93,14 @@ config = SandboxConfig(
     image="ubuntu:22.04",
     cpu_max="0.5",             # 50% of one CPU (also: "2" for 2 cores, "50%")
     memory_max="512m",         # 512MB (also accepts "2g", "536870912")
+    memory_swap="1g",          # total memory+swap (Docker semantics), "-1" for unlimited
     pids_max="256",
     io_max="/dev/sda 10mb",    # 10MB/s write limit (also: "rbps=5mb wbps=10mb")
-    cpuset_cpus="0-3",           # pin to CPU 0-3
-    oom_score_adj=500,           # prefer killing sandbox over host processes
+    cpu_shares=1024,           # relative CPU weight (Docker --cpu-shares)
+    cpuset_cpus="0-3",         # pin to CPU 0-3
+    oom_score_adj=500,         # prefer killing sandbox over host processes
+    shm_size="256m",           # /dev/shm size (default 64m, matches Docker)
+    tmpfs=["/run:size=100m"],  # additional tmpfs mounts
 )
 ```
 
@@ -477,6 +481,10 @@ python examples/benchmark.py
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 | `--oom-score-adj 500` | `oom_score_adj=500` |
+| `--shm-size 256m` | `shm_size="256m"` |
+| `--cpu-shares 1024` | `cpu_shares=1024` |
+| `--memory-swap 1g` | `memory_swap="1g"` |
+| `--tmpfs /run:size=100m` | `tmpfs=["/run:size=100m"]` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 | `docker compose down` | `proj.down()` |
 
@@ -509,7 +517,7 @@ sb.run("echo hello")
 sb.delete()
 ```
 
-Supported parameters: `cpus`, `mem_limit`, `pids_limit`, `volumes` (dict or list), `ports` (dict or list), `environment` (dict or list), `hostname`, `dns`, `read_only`, `working_dir`, `devices`, `network_mode`, `tty`, `security_opt`, `privileged`, `oom_score_adj`, `cpuset_cpus`. Unsupported parameters are logged as warnings and ignored.
+Supported parameters: `cpus`, `mem_limit`, `memswap_limit`, `pids_limit`, `cpu_shares`, `volumes` (dict or list), `ports` (dict or list), `environment` (dict or list), `hostname`, `dns`, `read_only`, `working_dir`, `devices`, `network_mode`, `tty`, `security_opt`, `privileged`, `oom_score_adj`, `cpuset_cpus`, `shm_size`, `tmpfs` (dict or list). Unsupported parameters are logged as warnings and ignored.
 
 ### `SandboxConfig.from_docker_run()` — CLI command string
 
@@ -561,7 +569,7 @@ Unsupported fields raise `ValueError` at parse time — no silent ignoring.
 
 | Status | Fields |
 |---|---|
-| **Supported** | `image`, `build`, `command`, `entrypoint`, `environment`, `volumes` (named + bind + `:ro`), `ports`, `devices`, `depends_on` (with `condition`), `healthcheck` (CMD, CMD-SHELL), `network_mode`, `dns`, `hostname`, `working_dir`, `restart`, `security_opt`, `cap_add`, `privileged`, `stop_grace_period`, `ulimits` |
+| **Supported** | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `volumes` (named + bind + `:ro`), `ports`, `devices`, `depends_on` (with `condition`), `healthcheck` (CMD, CMD-SHELL), `network_mode`, `dns`, `hostname`, `working_dir`, `restart`, `security_opt`, `cap_add`, `privileged`, `stop_grace_period`, `ulimits`, `shm_size`, `tmpfs`, `cpu_shares`, `mem_limit`, `memswap_limit` |
 | **Supported** | `networks` — services on the same network share a network namespace (can communicate via localhost). Services on different networks are isolated (different netns). Uses Podman-style shared userns+netns sentinel per network. |
-| **Parsed but ignored** | `container_name`, `profiles`, `stdin_open`, `tty`, `env_file`, `extra_hosts`, `labels`, `logging` |
-| **Not supported (will error)** | `shm_size`, `tmpfs`, `sysctls`, `init`, `user`, `pid`, `ipc`, `configs`, `secrets`, `deploy`, `cgroup_parent`, `runtime` |
+| **Parsed but ignored** | `container_name`, `profiles`, `stdin_open`, `tty`, `extra_hosts`, `labels`, `logging` |
+| **Not supported (will error)** | `sysctls`, `init`, `user`, `pid`, `ipc`, `configs`, `secrets`, `deploy`, `cgroup_parent`, `runtime` |

@@ -121,6 +121,15 @@ def _parse_io_max(value: str) -> str:
         return f"{dev} wbps={raw_size}"
 
 
+def _convert_cpu_shares(shares: int) -> int:
+    """Convert Docker ``--cpu-shares`` to cgroup v2 ``cpu.weight``.
+
+    Docker uses a range of 2-262144 (default 1024).
+    cgroup v2 uses 1-10000 (default 100).
+    """
+    return max(1, min(10000, 1 + ((shares - 2) * 9999) // 262142))
+
+
 # ------------------------------------------------------------------ #
 #  Docker format converters (used by from_docker / from_docker_run)    #
 # ------------------------------------------------------------------ #
@@ -229,6 +238,14 @@ class SandboxConfig:
         port_map: Port mappings as ``["host_port:container_port", ...]``.
             Requires ``pasta`` (from the ``passt`` package). Automatically
             enables network isolation with NAT'd internet access.
+        shm_size: Size of ``/dev/shm`` tmpfs mount (e.g. ``"256m"``,
+            ``"2g"``).  ``None`` uses 64MB default (matches Docker).
+        cpu_shares: Relative CPU weight (Docker ``--cpu-shares``).
+            Converted to cgroup v2 ``cpu.weight``.  Default 1024 = normal.
+        memory_swap: Total memory + swap limit (Docker semantics).
+            ``"-1"`` for unlimited swap.  Converted to cgroup v2
+            ``memory.swap.max`` (swap-only portion).
+        tmpfs: Additional tmpfs mounts as ``["/run:size=100m", ...]``.
     """
 
     image: str = ""
@@ -259,6 +276,10 @@ class SandboxConfig:
     allowed_ports: Optional[list[int]] = None
     oom_score_adj: Optional[int] = None
     cpuset_cpus: Optional[str] = None
+    shm_size: Optional[str] = None
+    cpu_shares: Optional[int] = None
+    memory_swap: Optional[str] = None
+    tmpfs: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:
@@ -273,6 +294,15 @@ class SandboxConfig:
             self.cpu_max = _parse_cpu_max(self.cpu_max)
         if self.io_max:
             self.io_max = _parse_io_max(self.io_max)
+        if self.shm_size:
+            self.shm_size = _parse_size(self.shm_size)
+        if self.memory_swap:
+            if self.memory_swap == "-1":
+                self.memory_swap = "max"
+            else:
+                swap_total = int(_parse_size(self.memory_swap))
+                mem_max = int(self.memory_max) if self.memory_max else 0
+                self.memory_swap = str(max(0, swap_total - mem_max))
 
     # ------------------------------------------------------------------ #
     #  Docker compatibility constructors                                   #
@@ -369,14 +399,36 @@ class SandboxConfig:
         if "oom_score_adj" in kwargs:
             cfg_kwargs["oom_score_adj"] = kwargs.pop("oom_score_adj")
 
+        # --- Shared memory ---
+        if "shm_size" in kwargs:
+            cfg_kwargs["shm_size"] = str(kwargs.pop("shm_size"))
+
+        # --- CPU shares ---
+        if "cpu_shares" in kwargs:
+            cfg_kwargs["cpu_shares"] = int(kwargs.pop("cpu_shares"))
+
+        # --- Memory swap ---
+        if "memswap_limit" in kwargs:
+            cfg_kwargs["memory_swap"] = str(kwargs.pop("memswap_limit"))
+
+        # --- Tmpfs ---
+        if "tmpfs" in kwargs:
+            raw = kwargs.pop("tmpfs")
+            if isinstance(raw, dict):
+                cfg_kwargs["tmpfs"] = [
+                    f"{p}:{o}" if o else p for p, o in raw.items()
+                ]
+            elif isinstance(raw, list):
+                cfg_kwargs["tmpfs"] = list(raw)
+
         # Pop known-but-unsupported params silently
         _docker_ignored = {
             "command", "entrypoint", "name", "detach", "remove",
             "auto_remove", "stdout", "stderr", "stream", "user",
             "labels", "log_config", "nano_cpus", "network",
-            "network_disabled", "platform", "runtime", "shm_size",
-            "stdin_open", "stop_signal", "tmpfs", "ulimits",
-            "memswap_limit", "mem_swappiness", "cap_add", "cap_drop",
+            "network_disabled", "platform", "runtime",
+            "stdin_open", "stop_signal", "ulimits",
+            "mem_swappiness", "cap_add", "cap_drop",
             "restart_policy", "healthcheck", "init", "ipc_mode",
             "isolation", "pid_mode", "publish_all_ports",
         }
@@ -462,6 +514,14 @@ class SandboxConfig:
                 kwargs["working_dir"] = _take()
             elif a == "--read-only":
                 kwargs["read_only"] = True
+            elif a == "--shm-size":
+                kwargs["shm_size"] = _take()
+            elif a == "--cpu-shares":
+                kwargs["cpu_shares"] = int(_take())
+            elif a == "--memory-swap":
+                kwargs["memory_swap"] = _take()
+            elif a == "--tmpfs":
+                kwargs.setdefault("tmpfs", []).append(_take())
             elif a == "--privileged":
                 kwargs["seccomp"] = False
             elif a == "--network":
