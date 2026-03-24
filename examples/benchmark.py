@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Benchmark: agentdocker-lite vs Docker lifecycle and command performance.
+"""Benchmark: agentdocker-lite vs Docker/Podman/OpenSandbox/SWE-MiniSandbox.
 
 Usage:
     python examples/benchmark.py
+    python examples/benchmark.py --no-docker --no-podman
+    python examples/benchmark.py --no-opensandbox --no-swe
 
-Runs identical operations on both backends and prints a comparison table.
-Requires Docker daemon running. No root required.
+Runs identical operations on all available backends and prints comparison tables.
+Auto-detects which backends are available and skips unavailable ones.
 """
 
 import subprocess
@@ -189,6 +191,230 @@ def bench_podman() -> dict | None:
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# OpenSandbox (HTTP API → Docker + execd daemon)
+# ---------------------------------------------------------------------------
+
+OPENSANDBOX_DOMAIN = "localhost:8080"
+
+def _opensandbox_available() -> bool:
+    try:
+        r = subprocess.run(["curl", "-s", f"http://{OPENSANDBOX_DOMAIN}/health"],
+                           capture_output=True, text=True, timeout=3)
+        return "healthy" in r.stdout
+    except Exception:
+        return False
+
+
+def bench_opensandbox() -> dict | None:
+    import asyncio
+    if not _opensandbox_available():
+        return None
+
+    async def _run():
+        from opensandbox import Sandbox as OSSandbox
+        from opensandbox.config import ConnectionConfig
+        from datetime import timedelta
+
+        config = ConnectionConfig(domain=OPENSANDBOX_DOMAIN,
+                                  request_timeout=timedelta(seconds=60))
+
+        async def _create():
+            return await OSSandbox.create(image=IMAGE, connection_config=config,
+                                          timeout=timedelta(minutes=5))
+
+        # Create
+        t0 = time.monotonic()
+        sb = await _create()
+        create_ms = (time.monotonic() - t0) * 1000
+
+        # Per-command latency
+        cmd_times = []
+        for i in range(N_COMMANDS):
+            t0 = time.monotonic()
+            await sb.commands.run(f"echo iteration-{i}")
+            cmd_times.append((time.monotonic() - t0) * 1000)
+        avg_cmd_ms = sum(cmd_times) / len(cmd_times)
+
+        # "Reset" = kill + create
+        t0 = time.monotonic()
+        await sb.kill(); await sb.close()
+        sb = await _create()
+        reset_ms = (time.monotonic() - t0) * 1000
+
+        # Delete
+        t0 = time.monotonic()
+        await sb.kill(); await sb.close()
+        delete_ms = (time.monotonic() - t0) * 1000
+
+        return {"create_ms": create_ms, "cmd_ms": avg_cmd_ms,
+                "reset_ms": reset_ms, "delete_ms": delete_ms}
+
+    return asyncio.run(_run())
+
+
+def bench_opensandbox_throughput() -> dict | None:
+    import asyncio
+    if not _opensandbox_available():
+        return None
+
+    async def _run():
+        from opensandbox import Sandbox as OSSandbox
+        from opensandbox.config import ConnectionConfig
+        from datetime import timedelta
+
+        config = ConnectionConfig(domain=OPENSANDBOX_DOMAIN,
+                                  request_timeout=timedelta(seconds=60))
+        sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+                                    timeout=timedelta(minutes=5))
+        await sb.commands.run("echo warmup")
+        N = 100
+        t0 = time.monotonic()
+        for i in range(N):
+            await sb.commands.run(f"echo {i}")
+        elapsed = time.monotonic() - t0
+        await sb.kill(); await sb.close()
+        return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+    return asyncio.run(_run())
+
+
+def bench_opensandbox_reset_loop() -> dict | None:
+    import asyncio
+    if not _opensandbox_available():
+        return None
+
+    async def _run():
+        from opensandbox import Sandbox as OSSandbox
+        from opensandbox.config import ConnectionConfig
+        from datetime import timedelta
+
+        config = ConnectionConfig(domain=OPENSANDBOX_DOMAIN,
+                                  request_timeout=timedelta(seconds=60))
+        N = 20  # Fewer iterations — each reset is slow
+        t0_total = time.monotonic()
+        sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+                                    timeout=timedelta(minutes=5))
+        for i in range(N):
+            await sb.commands.run(f"echo episode-{i}")
+            await sb.kill(); await sb.close()
+            sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+                                        timeout=timedelta(minutes=5))
+        await sb.kill(); await sb.close()
+        elapsed = time.monotonic() - t0_total
+        return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+    return asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# SWE-MiniSandbox (pexpect + PS1 matching, no container)
+# ---------------------------------------------------------------------------
+
+def _swe_available() -> bool:
+    try:
+        import swerex  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def bench_swe() -> dict | None:
+    import asyncio
+    if not _swe_available():
+        return None
+
+    from swerex.runtime.sandbox import LocalRuntime
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    def _create():
+        rt = LocalRuntime()
+        asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
+        return rt
+
+    def _run_cmd(rt, cmd):
+        return asyncio.run(rt.run_in_session(BashAction(
+            command=cmd, timeout=10, check="silent")))
+
+    def _close(rt):
+        asyncio.run(rt.close())
+
+    # Create
+    t0 = time.monotonic()
+    rt = _create()
+    create_ms = (time.monotonic() - t0) * 1000
+
+    # Per-command latency
+    cmd_times = []
+    for i in range(N_COMMANDS):
+        t0 = time.monotonic()
+        _run_cmd(rt, f"echo iteration-{i}")
+        cmd_times.append((time.monotonic() - t0) * 1000)
+    avg_cmd_ms = sum(cmd_times) / len(cmd_times)
+
+    # "Reset" = close + recreate session
+    t0 = time.monotonic()
+    _close(rt)
+    rt = _create()
+    reset_ms = (time.monotonic() - t0) * 1000
+
+    # Delete
+    t0 = time.monotonic()
+    _close(rt)
+    delete_ms = (time.monotonic() - t0) * 1000
+
+    return {"create_ms": create_ms, "cmd_ms": avg_cmd_ms,
+            "reset_ms": reset_ms, "delete_ms": delete_ms}
+
+
+def bench_swe_throughput() -> dict | None:
+    import asyncio
+    if not _swe_available():
+        return None
+
+    from swerex.runtime.sandbox import LocalRuntime
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    rt = LocalRuntime()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
+    asyncio.run(rt.run_in_session(BashAction(command="echo warmup", timeout=10, check="silent")))
+    N = 100
+    t0 = time.monotonic()
+    for i in range(N):
+        asyncio.run(rt.run_in_session(BashAction(
+            command=f"echo {i}", timeout=10, check="silent")))
+    elapsed = time.monotonic() - t0
+    asyncio.run(rt.close())
+    return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
+
+
+def bench_swe_reset_loop() -> dict | None:
+    import asyncio
+    if not _swe_available():
+        return None
+
+    from swerex.runtime.sandbox import LocalRuntime
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    N = 50
+    rt = LocalRuntime()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
+    t0_total = time.monotonic()
+    for i in range(N):
+        asyncio.run(rt.run_in_session(BashAction(
+            command=f"echo episode-{i}", timeout=10, check="silent")))
+        asyncio.run(rt.close())
+        rt = LocalRuntime()
+        asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10)))
+    asyncio.run(rt.close())
+    elapsed = time.monotonic() - t0_total
+    return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +728,8 @@ def _docker_available() -> bool:
     return subprocess.run(["docker", "info"], capture_output=True).returncode == 0
 
 
-def main(skip_docker: bool = False, skip_podman: bool = False):
+def main(skip_docker: bool = False, skip_podman: bool = False,
+         skip_opensandbox: bool = False, skip_swe: bool = False):
     # Auto-detect unavailable backends
     if not skip_docker and not _docker_available():
         print("Docker not available, skipping")
@@ -510,6 +737,12 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
     if not skip_podman and not _podman_available():
         print("Podman not available, skipping")
         skip_podman = True
+    if not skip_opensandbox and not _opensandbox_available():
+        print("OpenSandbox not available, skipping")
+        skip_opensandbox = True
+    if not skip_swe and not _swe_available():
+        print("SWE-MiniSandbox not available, skipping")
+        skip_swe = True
 
     # Cleanup stale containers
     if not skip_docker:
@@ -523,6 +756,10 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
         backends.append("Docker")
     if not skip_podman:
         backends.append("Podman")
+    if not skip_opensandbox:
+        backends.append("OpenSandbox")
+    if not skip_swe:
+        backends.append("SWE-Mini")
     print(f"Backends: {', '.join(backends)}\n")
 
     # Warmup: ensure rootfs is cached (first export is slow)
@@ -541,6 +778,16 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
         print("Running Podman benchmark...")
         podman = bench_podman()
 
+    opensandbox = None
+    if not skip_opensandbox:
+        print("Running OpenSandbox benchmark...")
+        opensandbox = bench_opensandbox()
+
+    swe = None
+    if not skip_swe:
+        print("Running SWE-MiniSandbox benchmark...")
+        swe = bench_swe()
+
     print("Running agentdocker-lite benchmark...")
     sandbox = bench_sandbox()
 
@@ -550,6 +797,10 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
         cols.append(("Docker", docker))
     if podman:
         cols.append(("Podman", podman))
+    if opensandbox:
+        cols.append(("OpenSandbox", opensandbox))
+    if swe:
+        cols.append(("SWE-Mini", swe))
     cols.append(("adl", sandbox))
 
     header = f"{'':20}" + "".join(f" {name:>12}" for name, _ in cols)
@@ -587,27 +838,47 @@ def main(skip_docker: bool = False, skip_podman: bool = False):
     # Sustained workloads
     print("\n--- Sustained workloads ---\n")
 
-    print("Throughput (1000 sequential commands)...")
+    print("Throughput (sequential commands)...")
     docker_tp = bench_docker_throughput() if not skip_docker else None
+    os_tp = bench_opensandbox_throughput() if not skip_opensandbox else None
+    swe_tp = bench_swe_throughput() if not skip_swe else None
     adl_tp = bench_throughput()
     if docker_tp:
-        print(f"  Docker: {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
+        print(f"  Docker:      {docker_tp['ops_per_sec']:.0f} cmd/s  (avg {docker_tp['avg_ms']:.1f}ms)")
+    if os_tp:
+        print(f"  OpenSandbox: {os_tp['ops_per_sec']:.0f} cmd/s  (avg {os_tp['avg_ms']:.1f}ms)")
+    if swe_tp:
+        print(f"  SWE-Mini:    {swe_tp['ops_per_sec']:.0f} cmd/s  (avg {swe_tp['avg_ms']:.1f}ms)")
     comparisons = []
     if docker_tp:
         comparisons.append(f"{adl_tp['ops_per_sec']/docker_tp['ops_per_sec']:.1f}x vs Docker")
-    print(f"  adl:    {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)"
+    if os_tp:
+        comparisons.append(f"{adl_tp['ops_per_sec']/os_tp['ops_per_sec']:.1f}x vs OpenSandbox")
+    if swe_tp:
+        comparisons.append(f"{adl_tp['ops_per_sec']/swe_tp['ops_per_sec']:.1f}x vs SWE-Mini")
+    print(f"  adl:         {adl_tp['ops_per_sec']:.0f} cmd/s  (avg {adl_tp['avg_ms']:.1f}ms)"
           + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
-    print("\nReset loop (100 cycles)...")
-    print("  Note: Docker/Podman 'reset' = rm + run (no equivalent to overlayfs upper clear)")
+    print("\nReset loop...")
+    print("  Note: Docker/Podman/OpenSandbox 'reset' = rm + run; SWE-Mini = close + reopen session")
     docker_rl = bench_docker_reset_loop() if not skip_docker else None
+    os_rl = bench_opensandbox_reset_loop() if not skip_opensandbox else None
+    swe_rl = bench_swe_reset_loop() if not skip_swe else None
     adl_rl = bench_reset_loop()
     if docker_rl:
-        print(f"  Docker: {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
+        print(f"  Docker:      {docker_rl['cycles_per_sec']:.1f} resets/s  (avg {docker_rl['avg_ms']:.0f}ms)")
+    if os_rl:
+        print(f"  OpenSandbox: {os_rl['cycles_per_sec']:.1f} resets/s  (avg {os_rl['avg_ms']:.0f}ms)")
+    if swe_rl:
+        print(f"  SWE-Mini:    {swe_rl['cycles_per_sec']:.1f} resets/s  (avg {swe_rl['avg_ms']:.0f}ms)")
     comparisons = []
     if docker_rl:
         comparisons.append(f"{adl_rl['cycles_per_sec']/docker_rl['cycles_per_sec']:.1f}x vs Docker")
-    print(f"  adl:    {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)"
+    if os_rl:
+        comparisons.append(f"{adl_rl['cycles_per_sec']/os_rl['cycles_per_sec']:.1f}x vs OpenSandbox")
+    if swe_rl:
+        comparisons.append(f"{adl_rl['cycles_per_sec']/swe_rl['cycles_per_sec']:.1f}x vs SWE-Mini")
+    print(f"  adl:         {adl_rl['cycles_per_sec']:.1f} resets/s  (avg {adl_rl['avg_ms']:.0f}ms)"
           + (f"  {', '.join(comparisons)}" if comparisons else ""))
 
     print("\nCheckpoint loop (50 run+restore cycles)...")
@@ -681,13 +952,16 @@ def bench_port_map():
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Benchmark agentdocker-lite vs Docker/Podman")
+    parser = argparse.ArgumentParser(description="Benchmark agentdocker-lite vs Docker/Podman/OpenSandbox/SWE-MiniSandbox")
     parser.add_argument("--no-docker", action="store_true", help="Skip Docker benchmarks")
     parser.add_argument("--no-podman", action="store_true", help="Skip Podman benchmarks")
+    parser.add_argument("--no-opensandbox", action="store_true", help="Skip OpenSandbox benchmarks")
+    parser.add_argument("--no-swe", action="store_true", help="Skip SWE-MiniSandbox benchmarks")
     parser.add_argument("--no-port-map", action="store_true", help="Skip port mapping benchmark")
     args = parser.parse_args()
 
-    main(skip_docker=args.no_docker, skip_podman=args.no_podman)
+    main(skip_docker=args.no_docker, skip_podman=args.no_podman,
+         skip_opensandbox=args.no_opensandbox, skip_swe=args.no_swe)
     if not args.no_port_map:
         print("\n--- Port mapping overhead ---\n")
         bench_port_map()
