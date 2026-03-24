@@ -196,6 +196,7 @@ class RootfulSandbox(SandboxBase):
             cgroup_path=self._cgroup_path,
             tty=config.tty,
             net_isolate=config.net_isolate,
+            net_ns=config.net_ns,
             seccomp=config.seccomp,
 
             hostname=config.hostname,

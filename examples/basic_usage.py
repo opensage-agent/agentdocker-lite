@@ -290,6 +290,50 @@ def demo_qemu_vm():
     shutil.rmtree(vm_dir, ignore_errors=True)
 
 
+def demo_compose():
+    """Demonstrate docker-compose compatibility.
+
+    Starts multiple services from a compose file, runs commands,
+    resets all services, and cleans up.
+    """
+    from agentdocker_lite import ComposeProject
+
+    # Create a minimal compose file
+    compose_path = os.path.join(tempfile.mkdtemp(prefix="adl_compose_"), "docker-compose.yml")
+    with open(compose_path, "w") as f:
+        f.write("""\
+services:
+  backend:
+    image: ubuntu:22.04
+    command: "sleep infinity"
+    hostname: backend
+  frontend:
+    image: ubuntu:22.04
+    command: "sleep infinity"
+    depends_on:
+      - backend
+""")
+
+    with ComposeProject(compose_path, project_name="demo") as proj:
+        print(f"  Services: {list(proj.services.keys())}")
+
+        # Run command in a service
+        output, ec = proj.run("backend", "echo hello from backend")
+        print(f"  backend: {output.strip()}")
+
+        # Service name resolution via /etc/hosts
+        output, ec = proj.run("frontend", "getent hosts backend")
+        print(f"  frontend resolves 'backend': {output.strip()}")
+
+        # Reset all services (filesystem-level)
+        proj.run("backend", "echo ephemeral > /tmp/test.txt")
+        proj.reset()
+        _, ec = proj.run("backend", "cat /tmp/test.txt 2>/dev/null")
+        print(f"  After reset, file gone: exit={ec}")
+
+    shutil.rmtree(os.path.dirname(compose_path), ignore_errors=True)
+
+
 if __name__ == "__main__":
     main()
     print()
@@ -301,3 +345,6 @@ if __name__ == "__main__":
     print()
     print("=== QEMU/KVM Demo ===")
     demo_qemu_vm()
+    print()
+    print("=== Docker Compose Demo ===")
+    demo_compose()

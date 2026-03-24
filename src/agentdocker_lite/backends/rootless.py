@@ -212,7 +212,7 @@ class RootlessSandbox(RootfulSandbox):
         # In rootless mode with port_map, DON'T pass net_isolate to unshare.
         # The setup script handles network isolation + pasta internally
         # (pasta needs to run inside the userns for CAP_SYS_ADMIN).
-        shell_net_isolate = config.net_isolate and not config.port_map
+        shell_net_isolate = config.net_isolate and not config.port_map and not config.net_ns
         t0 = time.monotonic()
         self._persistent_shell = _PersistentShell(
             rootfs=self._rootfs,
@@ -221,11 +221,13 @@ class RootlessSandbox(RootfulSandbox):
             working_dir=config.working_dir or "/",
             tty=config.tty,
             net_isolate=shell_net_isolate,
+            net_ns=config.net_ns,
             seccomp=config.seccomp,
             userns_setup_script=str(setup_script_path),
             systemd_scope_properties=self._systemd_scope_properties or None,
             hostname=config.hostname,
             subuid_range=subuid_range,
+            shared_userns=config.shared_userns,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 

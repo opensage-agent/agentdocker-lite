@@ -432,3 +432,47 @@ python examples/benchmark.py
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 | `--oom-score-adj 500` | `oom_score_adj=500` |
+| `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
+| `docker compose down` | `proj.down()` |
+
+## Docker Compose compatibility
+
+Run multi-service `docker-compose.yml` files as agentdocker-lite sandboxes. Each service becomes an independent sandbox with filesystem-level `reset()` — no application-specific reset endpoints needed.
+
+```python
+from agentdocker_lite import ComposeProject
+
+# Start all services (dependency order, health checks)
+proj = ComposeProject("docker-compose.yml", env={"API_PORT": "8030"})
+proj.up()
+
+# Access individual services
+proj.services["api"].run("curl localhost:8030/health")
+
+# Filesystem-level reset — all services reset to initial state
+proj.reset()
+
+# Cleanup
+proj.down()
+```
+
+Works as a context manager:
+
+```python
+with ComposeProject("docker-compose.yml") as proj:
+    output, ec = proj.run("api", "python manage.py migrate")
+    # all services auto-cleaned on exit
+```
+
+Requires `pyyaml`: `pip install agentdocker-lite[compose]`
+
+### Compose field support
+
+Unsupported fields raise `ValueError` at parse time — no silent ignoring.
+
+| Status | Fields |
+|---|---|
+| **Supported** | `image`, `build`, `command`, `entrypoint`, `environment`, `volumes` (named + bind + `:ro`), `ports`, `devices`, `depends_on` (with `condition`), `healthcheck` (CMD, CMD-SHELL), `network_mode`, `dns`, `hostname`, `working_dir`, `restart`, `security_opt`, `cap_add`, `privileged`, `stop_grace_period`, `ulimits` |
+| **Supported** | `networks` — services on the same network share a network namespace (can communicate via localhost). Services on different networks are isolated (different netns). Uses Podman-style shared userns+netns sentinel per network. |
+| **Parsed but ignored** | `container_name`, `profiles`, `stdin_open`, `tty`, `env_file`, `extra_hosts`, `labels`, `logging` |
+| **Not supported (will error)** | `shm_size`, `tmpfs`, `sysctls`, `init`, `user`, `pid`, `ipc`, `configs`, `secrets`, `deploy`, `cgroup_parent`, `runtime` |

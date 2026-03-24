@@ -44,12 +44,14 @@ class _PersistentShell:
         cgroup_path=None,
         tty: bool = False,
         net_isolate: bool = False,
+        net_ns: Optional[str] = None,
         seccomp: bool = True,
         userns_setup_script: Optional[str] = None,
         systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
         read_only: bool = False,
         subuid_range: Optional[tuple[int, int, int]] = None,
+        shared_userns: Optional[str] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -58,6 +60,7 @@ class _PersistentShell:
         self._cgroup_path = cgroup_path
         self._tty = tty
         self._net_isolate = net_isolate
+        self._net_ns = net_ns
         self._seccomp = seccomp
         self._userns = userns_setup_script is not None
         self._userns_setup_script = userns_setup_script
@@ -65,6 +68,7 @@ class _PersistentShell:
         self._hostname = hostname
         self._read_only = read_only
         self._subuid_range = subuid_range  # (outer_id, sub_start, sub_count) or None
+        self._shared_userns = shared_userns  # path to existing userns to join
         self._process: Optional[subprocess.Popen] = None
         self._pidfd: Optional[int] = None
         self._master_fd: Optional[int] = None
@@ -86,7 +90,36 @@ class _PersistentShell:
         self._signal_r = signal_r
         self._signal_fd = signal_w  # Remember fd number for bash scripts
 
-        if self._userns:
+        if self._userns and self._shared_userns:
+            # Shared userns mode: enter an existing user namespace (and
+            # optionally its netns) via nsenter, then create own mount/pid
+            # namespaces.  No newuidmap needed — the sentinel already has
+            # the uid mapping.  The kernel allows the userns creator to
+            # nsenter from the parent userns (cap_capable owner check).
+            nsenter_cmd: list[str] = [
+                "nsenter",
+                f"--user={self._shared_userns}",
+            ]
+            if self._net_ns:
+                nsenter_cmd.append(f"--net={self._net_ns}")
+            nsenter_cmd.extend([
+                "--", "unshare",
+                "--pid", "--mount", "--propagation", "slave",
+                "--uts", "--ipc",
+                "--fork", "bash", str(self._userns_setup_script),
+            ])
+            self._sync_fds = None
+
+            if self._systemd_scope_properties:
+                cmd: list[str] = ["systemd-run", "--user", "--scope", "--quiet"]
+                for prop in self._systemd_scope_properties:
+                    cmd.extend(["--property", prop])
+                cmd.append("--")
+                cmd.extend(nsenter_cmd)
+            else:
+                cmd = nsenter_cmd
+
+        elif self._userns:
             # User namespace mode: setup script handles mount/chroot,
             # stdin is used for phase 2 init (post-chroot).
             use_full_mapping = self._subuid_range is not None
@@ -102,7 +135,9 @@ class _PersistentShell:
                 "--pid", "--mount", "--propagation", "slave",
                 "--uts", "--ipc",
             ])
-            if self._net_isolate:
+            if self._net_ns:
+                unshare_cmd.append(f"--net={self._net_ns}")
+            elif self._net_isolate:
                 unshare_cmd.append("--net")
 
             if use_full_mapping:
@@ -126,7 +161,7 @@ class _PersistentShell:
 
             # Wrap in systemd-run --user --scope for cgroup delegation
             if self._systemd_scope_properties:
-                cmd: list[str] = ["systemd-run", "--user", "--scope", "--quiet"]
+                cmd = ["systemd-run", "--user", "--scope", "--quiet"]
                 for prop in self._systemd_scope_properties:
                     cmd.extend(["--property", prop])
                 cmd.append("--")

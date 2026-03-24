@@ -78,6 +78,10 @@ class SandboxConfig:
             only allowed to volumes and tmpfs mounts.
         io_max: cgroup v2 ``io.max`` value for disk I/O throttling
             (e.g. ``"259:0 wbps=10485760"`` for 10MB/s write on device 259:0).
+        net_ns: Path to an existing network namespace file to join
+            (e.g. ``"/proc/123/ns/net"``).  The sandbox shares the
+            network stack with other processes in the same netns.
+            Mutually exclusive with ``net_isolate`` and ``port_map``.
         port_map: Port mappings as ``["host_port:container_port", ...]``.
             Requires ``pasta`` (from the ``passt`` package). Automatically
             enables network isolation with NAT'd internet access.
@@ -101,6 +105,8 @@ class SandboxConfig:
     hostname: Optional[str] = None
     dns: Optional[list[str]] = None
     read_only: bool = False
+    net_ns: Optional[str] = None
+    shared_userns: Optional[str] = None
     port_map: Optional[list[str]] = None
     ipv6: bool = False  # pasta IPv4-only by default; localhost works.
     # Set True for IPv6 networking (localhost may fail — use 127.0.0.1).

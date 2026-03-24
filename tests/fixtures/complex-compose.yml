@@ -1,0 +1,119 @@
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: appdb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  mail:
+    image: axllent/mailpit:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      MP_UI_BIND_ADDR: "0.0.0.0:${MAIL_UI_PORT:-8025}"
+      MP_SMTP_BIND_ADDR: "0.0.0.0:${MAIL_SMTP_PORT:-1025}"
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+      target: production
+      network: host
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    network_mode: host
+    security_opt:
+      - seccomp:unconfined
+    privileged: true
+    depends_on:
+      db:
+        condition: service_healthy
+      mail:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${API_PORT:-8030}/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - appdata:/app/data
+      - ./config:/app/config:ro
+    working_dir: /app/src
+    environment:
+      - DB_URL=postgresql://postgres:secret@127.0.0.1:${DB_PORT:-5432}/appdb
+      - MAIL_HOST=127.0.0.1
+      - MAIL_PORT=${MAIL_SMTP_PORT:-1025}
+      - API_PORT=${API_PORT:-8030}
+    command: ["python", "main.py", "--port", "${API_PORT:-8030}"]
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    network_mode: host
+    dns:
+      - 8.8.8.8
+    depends_on:
+      - mail
+      - api
+    environment:
+      - API_URL=http://127.0.0.1:${API_PORT:-8030}
+      - FRONTEND_PORT=${FRONTEND_PORT:-8050}
+
+  vm:
+    image: qemu-vm:latest
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "${MGMT_PORT:-8006}:8006"
+      - "${RDP_PORT:-3389}:3389/tcp"
+      - "${RDP_PORT:-3389}:3389/udp"
+    volumes:
+      - ./storage:/storage
+      - ./entry.sh:/run/entry.sh:ro
+    restart: always
+    stop_grace_period: 2m
+    command: "bash /run/entry.sh"
+    environment:
+      CPU_MODEL: host
+      DISK_FMT: qcow2
+
+  healthcheck-sidecar:
+    image: curlimages/curl:latest
+    networks:
+      - default
+    depends_on:
+      - vm
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://vm:8005/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+    restart: always
+
+volumes:
+  pgdata:
+    driver: local
+  appdata:
