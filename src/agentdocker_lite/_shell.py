@@ -52,6 +52,7 @@ class _PersistentShell:
         read_only: bool = False,
         subuid_range: Optional[tuple[int, int, int]] = None,
         shared_userns: Optional[str] = None,
+        ulimits: Optional[dict[str, tuple[int, int]]] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -69,6 +70,7 @@ class _PersistentShell:
         self._read_only = read_only
         self._subuid_range = subuid_range  # (outer_id, sub_start, sub_count) or None
         self._shared_userns = shared_userns  # path to existing userns to join
+        self._ulimits = ulimits or {}
         self._process: Optional[subprocess.Popen] = None
         self._pidfd: Optional[int] = None
         self._master_fd: Optional[int] = None
@@ -346,11 +348,25 @@ class _PersistentShell:
         # Security (mask/readonly/seccomp/cap-drop) + hostname is handled
         # by adl-seccomp. Init script only does cd + signal.
 
+        # Build ulimit commands if configured
+        _ulimit_map = {
+            "nofile": "-n", "nproc": "-u", "memlock": "-l",
+            "stack": "-s", "core": "-c", "fsize": "-f",
+            "data": "-d", "rss": "-m", "as": "-v",
+        }
+        ulimit_lines = ""
+        for name, (soft, hard) in self._ulimits.items():
+            flag = _ulimit_map.get(name)
+            if flag:
+                ulimit_lines += f"ulimit -H {flag} {hard} 2>/dev/null\n"
+                ulimit_lines += f"ulimit -S {flag} {soft} 2>/dev/null\n"
+
         if self._userns:
             # User namespace: adl-seccomp handles everything.
             init_script = (
                 "PS1='' PS2=''\n"
-                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                + ulimit_lines
+                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
         else:

@@ -1297,6 +1297,29 @@ class TestShmSize:
             sb.delete()
 
 
+class TestUlimitsIntegration:
+    """Verify ulimits are applied inside sandbox."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("rootless only")
+
+    def test_nofile_limit(self, shared_cache_dir, tmp_path):
+        self._skip_if_root()
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            ulimits={"nofile": (1024, 2048)},
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="ulimit-test")
+        try:
+            out, ec = sb.run("ulimit -n")
+            assert ec == 0
+            assert out.strip() == "1024"
+        finally:
+            sb.delete()
+
+
 class TestTmpfsMounts:
     """Verify tmpfs mounts work correctly."""
 

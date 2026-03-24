@@ -1410,6 +1410,56 @@ class TestTmpfs:
         assert cfg.tmpfs == ["/run:size=50m"]
 
 
+class TestCapAdd:
+    """Unit tests for cap_add."""
+
+    def test_from_docker(self):
+        cfg = SandboxConfig.from_docker("img", cap_add=["SYS_PTRACE", "NET_ADMIN"])
+        assert cfg.cap_add == ["SYS_PTRACE", "NET_ADMIN"]
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --cap-add SYS_ADMIN --cap-add NET_RAW ubuntu"
+        )
+        assert "SYS_ADMIN" in cfg.cap_add
+        assert "NET_RAW" in cfg.cap_add
+
+    def test_sys_admin_disables_seccomp(self):
+        cfg = SandboxConfig(image="x", cap_add=["SYS_ADMIN"])
+        assert cfg.seccomp is False
+
+    def test_no_cap_keeps_seccomp(self):
+        cfg = SandboxConfig(image="x", cap_add=["NET_ADMIN"])
+        assert cfg.seccomp is True
+
+
+class TestUlimits:
+    """Unit tests for ulimits."""
+
+    def test_from_docker_dict(self):
+        cfg = SandboxConfig.from_docker("img", ulimits={
+            "nofile": {"soft": 65536, "hard": 65536},
+            "nproc": {"soft": 4096, "hard": 8192},
+        })
+        assert cfg.ulimits["nofile"] == (65536, 65536)
+        assert cfg.ulimits["nproc"] == (4096, 8192)
+
+    def test_from_docker_int(self):
+        cfg = SandboxConfig.from_docker("img", ulimits={"nofile": 65536})
+        assert cfg.ulimits["nofile"] == (65536, 65536)
+
+    def test_from_docker_run(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --ulimit nofile=65536:65536 --ulimit nproc=4096 ubuntu"
+        )
+        assert cfg.ulimits["nofile"] == (65536, 65536)
+        assert cfg.ulimits["nproc"] == (4096, 4096)
+
+    def test_config_direct(self):
+        cfg = SandboxConfig(image="x", ulimits={"nofile": (1024, 2048)})
+        assert cfg.ulimits["nofile"] == (1024, 2048)
+
+
 class TestApplyImageDefaults:
     """Unit tests for _apply_image_defaults (image config backfill)."""
 

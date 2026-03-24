@@ -236,6 +236,7 @@ class RootlessSandbox(RootfulSandbox):
             hostname=config.hostname,
             subuid_range=subuid_range,
             shared_userns=config.shared_userns,
+            ulimits=config.ulimits or None,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 

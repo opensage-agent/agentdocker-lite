@@ -281,6 +281,9 @@ class SandboxConfig:
     cpu_shares: Optional[int] = None
     memory_swap: Optional[str] = None
     tmpfs: list[str] = field(default_factory=list)
+    cap_add: list[str] = field(default_factory=list)
+    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # ulimits maps resource name → (soft, hard), e.g. {"nofile": (65536, 65536)}
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:
@@ -306,6 +309,10 @@ class SandboxConfig:
                 swap_total = int(_parse_size(self.memory_swap))
                 mem_max = int(self.memory_max) if self.memory_max else 0
                 self.memory_swap = str(max(0, swap_total - mem_max))
+        # cap_add with privileged capabilities disables seccomp
+        _privileged_caps = {"SYS_ADMIN", "ALL", "SYS_PTRACE", "SYS_RAWIO"}
+        if self.cap_add and _privileged_caps & set(self.cap_add):
+            self.seccomp = False
 
     # ------------------------------------------------------------------ #
     #  Docker compatibility constructors                                   #
@@ -424,14 +431,42 @@ class SandboxConfig:
             elif isinstance(raw, list):
                 cfg_kwargs["tmpfs"] = list(raw)
 
+        # --- Capabilities ---
+        if "cap_add" in kwargs:
+            cfg_kwargs["cap_add"] = list(kwargs.pop("cap_add"))
+        kwargs.pop("cap_drop", None)  # not mapped (we drop all by default)
+
+        # --- Ulimits ---
+        if "ulimits" in kwargs:
+            raw = kwargs.pop("ulimits")
+            # Docker SDK format: {"nofile": {"soft": 65536, "hard": 65536}}
+            # or docker.types.Ulimit objects with .name, .soft, .hard
+            ulimits: dict[str, tuple[int, int]] = {}
+            if isinstance(raw, dict):
+                for name, spec in raw.items():
+                    if isinstance(spec, dict):
+                        ulimits[name] = (spec.get("soft", 0), spec.get("hard", 0))
+                    elif isinstance(spec, int):
+                        ulimits[name] = (spec, spec)
+                    else:
+                        # docker.types.Ulimit object
+                        ulimits[getattr(spec, "name", name)] = (
+                            getattr(spec, "soft", 0), getattr(spec, "hard", 0),
+                        )
+            elif isinstance(raw, list):
+                for item in raw:
+                    ulimits[item.name] = (item.soft, item.hard)
+            if ulimits:
+                cfg_kwargs["ulimits"] = ulimits
+
         # Pop known-but-unsupported params silently
         _docker_ignored = {
             "command", "entrypoint", "name", "detach", "remove",
             "auto_remove", "stdout", "stderr", "stream", "user",
             "labels", "log_config", "nano_cpus", "network",
             "network_disabled", "platform", "runtime",
-            "stdin_open", "stop_signal", "ulimits",
-            "mem_swappiness", "cap_add", "cap_drop",
+            "stdin_open", "stop_signal",
+            "mem_swappiness",
             "restart_policy", "healthcheck", "init", "ipc_mode",
             "isolation", "pid_mode", "publish_all_ports",
         }
@@ -525,6 +560,17 @@ class SandboxConfig:
                 kwargs["memory_swap"] = _take()
             elif a == "--tmpfs":
                 kwargs.setdefault("tmpfs", []).append(_take())
+            elif a == "--cap-add":
+                kwargs.setdefault("cap_add", []).append(_take())
+            elif a == "--ulimit":
+                # Format: "nofile=65536:65536" or "nofile=65536"
+                spec = _take()
+                name, _, limits = spec.partition("=")
+                if ":" in limits:
+                    soft, _, hard = limits.partition(":")
+                    kwargs.setdefault("ulimits", {})[name] = (int(soft), int(hard))
+                elif limits:
+                    kwargs.setdefault("ulimits", {})[name] = (int(limits), int(limits))
             elif a == "--privileged":
                 kwargs["seccomp"] = False
             elif a == "--network":
