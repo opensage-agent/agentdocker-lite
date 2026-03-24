@@ -3,7 +3,7 @@
 [![Tests](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
 [![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
 
@@ -121,7 +121,7 @@ sb.reset()   # instant filesystem reset
 sb.delete()  # full cleanup
 ```
 
-No `sudo` required. The sandbox automatically uses user namespaces for full isolation.
+No `sudo` required. The sandbox automatically uses user namespaces for full isolation. OCI image config (`WORKDIR`, `ENV`) is auto-applied — user values take precedence.
 
 ## Configuration
 
@@ -247,16 +247,7 @@ output, _ = sb.run("cat /workspace/data.txt")
 # "state_v1\n" — fully restored
 ```
 
-### Crash recovery
-
-```python
-from agentdocker_lite import SandboxBase
-SandboxBase.cleanup_stale()
-```
-
 ## Performance
-
-### Single-operation latency
 
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
@@ -264,44 +255,10 @@ SandboxBase.cleanup_stale()
 | Per command | 17ms | 11ms | **1.7x** |
 | Reset | 605ms | 7ms | **82x** |
 | Delete | 217ms | 2ms | **127x** |
-| Checkpoint save | — | 12ms | — |
-| Checkpoint restore | — | 13ms | — |
-
-### Sustained workloads
-
-| | Docker | agentdocker-lite | Speedup |
-|---|---|---|---|
-| Throughput (1000 cmds) | 58 cmd/s | 95 cmd/s | **1.6x** |
 | Reset loop (100 cycles) | 2.0/s | 57.1/s | **29x** |
-| Checkpoint restore loop (50 cycles) | — | 39.6/s | — |
-| 4x concurrent (10 cmds each) | 28 cmd/s | 331 cmd/s | **12x** |
-| 8x concurrent | 31 cmd/s | 622 cmd/s | **20x** |
 | 16x concurrent | 32 cmd/s | 1009 cmd/s | **32x** |
 
-Reproduce: `python examples/benchmark.py`
-
-## Docker Compose compatibility
-
-```python
-from agentdocker_lite import ComposeProject
-
-with ComposeProject("docker-compose.yml") as proj:
-    proj.services["api"].run("curl localhost:8080/health")
-    proj.reset()   # filesystem-level reset for all services
-```
-
-Each service runs as an independent sandbox. Services on the same `networks` share a network namespace (can communicate via localhost), different networks are isolated. See [quick_start.md](docs/quick_start.md) for supported compose fields.
-
-## CLI
-
-```bash
-adl ps                  # list running sandboxes
-adl kill <name>         # kill and clean up a sandbox
-adl kill --all          # kill all sandboxes
-adl cleanup             # remove stale sandbox directories
-```
-
-Install: `pip install agentdocker-lite` provides the `adl` command.
+Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start.md](docs/quick_start.md#performance) | Reproduce: `python examples/benchmark.py`
 
 ## Docker migration cheatsheet
 
@@ -310,39 +267,10 @@ Install: `pip install agentdocker-lite` provides the `adl` command.
 | Docker | agentdocker-lite |
 |---|---|
 | `client.containers.run("img", cpus=0.5, ...)` | `SandboxConfig.from_docker("img", cpus=0.5, ...)` |
-| `docker run --cpus=0.5 -m 512m img` | `SandboxConfig.from_docker_run("docker run --cpus=0.5 -m 512m img")` |
+| `docker run --cpus=0.5 -m 512m img` | `SandboxConfig.from_docker_run("docker run ...")` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 
-**Manual mapping:**
-
-| Docker | agentdocker-lite |
-|---|---|
-| `docker run -d ubuntu:22.04` | `sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))` |
-| `docker exec <id> echo hello` | `sb.run("echo hello")` |
-| `docker exec -it <id> bash` | `proc = sb.popen("bash")` |
-| `docker cp file.txt <id>:/path` | `sb.copy_to("file.txt", "/path")` |
-| `docker cp <id>:/path file.txt` | `sb.copy_from("/path", "file.txt")` |
-| `docker rm -f <id> && docker run -d ...` | `sb.reset()` |
-| `docker rm -f <id>` | `sb.delete()` |
-| `-v /host:/container:ro` | `volumes=["/host:/container:ro"]` |
-| `-v /host:/container:rw` | `volumes=["/host:/container:rw"]` |
-| *(no equivalent)* | `volumes=["/host:/container:cow"]` |
-| `--memory 512m` | `memory_max="512m"` |
-| `--cpus 0.5` | `cpu_max="0.5"` |
-| `--pids-limit 256` | `pids_max="256"` |
-| `--hostname worker-0` | `hostname="worker-0"` |
-| `--dns 8.8.8.8` | `dns=["8.8.8.8"]` |
-| `--read-only` | `read_only=True` |
-| `--network none` | `net_isolate=True` |
-| `-p 8080:80` | `net_isolate=True, port_map=["8080:80"]` |
-| `docker checkpoint create` (CRIU) | `CheckpointManager(sb).save("/path")` |
-| `docker start --checkpoint` | `CheckpointManager(sb).restore("/path")` |
-| `--gpus all` | `devices=["/dev/nvidia0", ...]` |
-| `--security-opt seccomp=...` | `seccomp=True` (default) |
-| `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
-| `docker compose down` | `proj.down()` |
-| `docker ps` | `adl ps` |
-| `docker kill <id>` | `adl kill <name>` |
+See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compose field support, and CLI reference (`adl ps/kill/cleanup`).
 
 ## Architecture
 

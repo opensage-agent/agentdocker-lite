@@ -15,10 +15,12 @@ Tests require Linux with user namespaces enabled. Some tests require root.
 
 ```bash
 # Rootless tests (no sudo)
-pytest tests/ -k rootless
+pytest tests/test_security.py -k UserNamespace
+pytest tests/test_compose.py tests/test_cli.py
 
-# Full test suite (requires root)
-sudo pytest tests/
+# Root tests
+sudo pytest tests/test_sandbox.py tests/test_security.py -k "not UserNamespace"
+sudo pytest tests/test_checkpoint.py
 ```
 
 On Ubuntu 24.04+, enable unprivileged user namespaces first:

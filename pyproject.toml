@@ -7,12 +7,12 @@ name = "agentdocker-lite"
 version = "0.0.5"
 description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
 requires-python = ">=3.12"
-license = "MIT"
+license = "Apache-2.0"
 classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
 ]
 readme = "README.md"

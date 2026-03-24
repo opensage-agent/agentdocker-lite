@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.5] - 2026-03-24
+
+### Added
+- **Docker compatibility layer**: `SandboxConfig.from_docker()` accepts Docker Python SDK kwargs, `SandboxConfig.from_docker_run()` parses `docker run` CLI strings. Zero-effort migration from Docker.
+- **Image config auto-apply**: `Sandbox()` automatically reads OCI image config and backfills `WORKDIR` and `ENV` — user values always take precedence.
+- **Resource limit sugar**: `cpu_max` accepts `"0.5"`, `"2"`, `"50%"` (not just raw cgroup format). `io_max` accepts `"/dev/sda 10mb"`. `_parse_size` supports `"10mb"`, `"1gb"` suffixes.
+- **SWE-bench benchmark**: `examples/bench_swebench.py` — reproducible Docker vs adl comparison with SWE-bench-style evaluation loop.
+- **GitHub Pages docs**: mkdocs-material site at opensage-agent.github.io/agentdocker-lite, auto-deployed on push.
+- **Auto-release on tag push**: `git tag v0.0.x && git push --tags` triggers PyPI publish + GitHub Release with auto-generated notes.
+- **Branch protection**: main requires CI to pass via PR.
+
+### Changed
+- **pyyaml is now a default dependency** (was optional `[compose]` extra). Simplifies install for compose users.
+- README restructured: "Drop-in Docker replacement" section with SWE-bench real-world comparison, updated migration cheatsheet with auto-convert entries.
+
+### Internal
+- 192 tests total (152 → 192), 41 new tests for parsers, from_docker, from_docker_run, image defaults.
+- ruff lint clean.
+
 ## [0.0.4] - 2026-03-21
 
 ### Rootless mode parity
