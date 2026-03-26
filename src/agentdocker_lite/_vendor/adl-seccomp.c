@@ -57,6 +57,7 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define NR_execve  59
 #define NR_exit    60
 #define NR_wait4   61
+#define NR_capset  126
 
 /* Landlock syscall numbers (same on x86_64 and aarch64) */
 #define NR_landlock_create_ruleset 444
@@ -133,6 +134,10 @@ struct kstat { char pad[24]; unsigned int st_mode; char rest[120]; };
 
 /* BPF filter header */
 struct bpf_prog { unsigned short len; void *filter; };
+
+/* capset structs (bubblewrap drop_all_caps pattern) */
+struct cap_hdr { unsigned int version; int pid; };
+struct cap_data { unsigned int effective, permitted, inheritable; };
 
 /* Landlock structs (match kernel UAPI layout) */
 struct ll_ruleset_attr {
@@ -392,14 +397,9 @@ static void _main(long argc, char **argv, char **envp) {
         }
     }
 
-    /* 2. Drop capabilities */
+    /* 2. Drop capabilities from bounding set */
     for (int c = 0; c <= 41; c++)
         if (!keep(c)) sc5(NR_prctl, PR_CAPBSET_DROP, c, 0, 0, 0);
-
-    /* 2b. Restore dumpable flag after cap drop (bubblewrap drop_privs pattern).
-     *     Without this, /proc/self becomes root-owned after cap drop,
-     *     preventing normal user processes from reading their own maps/status. */
-    sc5(NR_prctl, PR_SET_DUMPABLE, 1, 0, 0, 0);
 
     /* 3. Mask paths */
     for (int i = 0; masked[i]; i++) {
@@ -471,6 +471,22 @@ static void _main(long argc, char **argv, char **envp) {
      * Loops on wait4(-1) until ECHILD, propagates initial child's exit status.
      * This ensures orphaned processes are reaped instead of accumulating as
      * zombies, which bash-as-PID-1 does not reliably do. */
+
+    /* Drop effective/permitted caps for init (bubblewrap drop_all_caps pattern).
+     * PR_CAPBSET_DROP only affects the bounding set, NOT effective/permitted.
+     * Without capset(), init retains full CapPrm/CapEff (never exec'd).
+     * The capability LSM's ptrace check requires the caller's caps to be a
+     * superset of the target's — so child (bash, reduced caps after exec)
+     * can't read /proc/1/ns/* if init has full caps.  capset() zeroes them. */
+    {
+        struct cap_hdr h = { 0x20080522 /* _LINUX_CAPABILITY_VERSION_3 */, 0 };
+        struct cap_data d[2] = {{0,0,0},{0,0,0}};
+        sc2(NR_capset, (long)&h, (long)d);
+    }
+
+    /* Restore dumpable after cap change (bubblewrap drop_privs pattern). */
+    sc5(NR_prctl, PR_SET_DUMPABLE, 1, 0, 0, 0);
+
     {
         int init_exit = 1;
         for (;;) {

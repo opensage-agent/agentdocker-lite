@@ -716,21 +716,21 @@ class TestComposeProject:
         try:
             proj.up()
             # Both on default network → share netns via SharedNetwork sentinel
-            ns_a, _ = proj.services["svc_a"].run("readlink /proc/self/ns/net")
-            ns_b, _ = proj.services["svc_b"].run("readlink /proc/self/ns/net")
+            ns_a, _ = proj.services["svc_a"].run("readlink /proc/1/ns/net")
+            ns_b, _ = proj.services["svc_b"].run("readlink /proc/1/ns/net")
             assert ns_a.strip() == ns_b.strip(), (
                 f"Expected same netns: {ns_a.strip()} vs {ns_b.strip()}"
             )
 
             # But they have different mount namespaces (filesystem isolation)
-            mnt_a, _ = proj.services["svc_a"].run("readlink /proc/self/ns/mnt")
-            mnt_b, _ = proj.services["svc_b"].run("readlink /proc/self/ns/mnt")
+            mnt_a, _ = proj.services["svc_a"].run("readlink /proc/1/ns/mnt")
+            mnt_b, _ = proj.services["svc_b"].run("readlink /proc/1/ns/mnt")
             assert mnt_a.strip() != mnt_b.strip(), "mount namespaces should differ"
 
             # After reset, shared netns should survive
             proj.reset()
-            ns_a2, _ = proj.services["svc_a"].run("readlink /proc/self/ns/net")
-            ns_b2, _ = proj.services["svc_b"].run("readlink /proc/self/ns/net")
+            ns_a2, _ = proj.services["svc_a"].run("readlink /proc/1/ns/net")
+            ns_b2, _ = proj.services["svc_b"].run("readlink /proc/1/ns/net")
             assert ns_a2.strip() == ns_b2.strip(), "shared netns lost after reset"
         finally:
             proj.down()
@@ -765,8 +765,8 @@ class TestComposeProject:
         )
         try:
             proj.up()
-            ns_x, _ = proj.services["svc_x"].run("readlink /proc/self/ns/net")
-            ns_y, _ = proj.services["svc_y"].run("readlink /proc/self/ns/net")
+            ns_x, _ = proj.services["svc_x"].run("readlink /proc/1/ns/net")
+            ns_y, _ = proj.services["svc_y"].run("readlink /proc/1/ns/net")
             assert ns_x.strip() != ns_y.strip(), (
                 f"Expected different netns: {ns_x.strip()} vs {ns_y.strip()}"
             )
@@ -902,8 +902,8 @@ class TestComposeProject:
             proj.up()
             # host_svc should see host network interfaces
             # normal_svc is on SharedNetwork (isolated netns)
-            ns_host, _ = proj.services["host_svc"].run("readlink /proc/self/ns/net")
-            ns_normal, _ = proj.services["normal_svc"].run("readlink /proc/self/ns/net")
+            ns_host, _ = proj.services["host_svc"].run("readlink /proc/1/ns/net")
+            ns_normal, _ = proj.services["normal_svc"].run("readlink /proc/1/ns/net")
             # They should be different — host_svc is on host netns
             assert ns_host.strip() != ns_normal.strip(), (
                 "host mode and normal mode should have different netns"
