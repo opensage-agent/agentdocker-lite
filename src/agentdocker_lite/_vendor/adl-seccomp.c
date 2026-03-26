@@ -53,11 +53,12 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define NR_sethostname 170
 #define NR_prctl   157
 #define NR_mount   165
-#define NR_clone   56
-#define NR_execve  59
-#define NR_exit    60
-#define NR_wait4   61
-#define NR_capset  126
+#define NR_clone          56
+#define NR_execve         59
+#define NR_exit           60
+#define NR_wait4          61
+#define NR_rt_sigaction   13
+#define NR_capset         126
 
 /* Landlock syscall numbers (same on x86_64 and aarch64) */
 #define NR_landlock_create_ruleset 444
@@ -79,6 +80,7 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define PR_SET_DUMPABLE     4
 #define SECCOMP_MODE_FILTER 2
 #define SIGCHLD 17
+#define WNOHANG 1
 
 /* Wait status macros (match kernel encoding, same as bubblewrap) */
 #define WIFEXITED(s)   (((s) & 0x7f) == 0)
@@ -449,9 +451,21 @@ static void _main(long argc, char **argv, char **envp) {
         }
     }
 
-    /* 8. Fork: child execs target, parent stays as PID 1 init.
-     *    Reaps orphaned zombies — follows bubblewrap do_init() pattern.
-     *    See: https://github.com/containers/bubblewrap/blob/main/bubblewrap.c */
+    /* 8a. Reset SIGCHLD to SIG_DFL (bubblewrap block_sigchild pattern).
+     *     If parent set SIGCHLD=SIG_IGN, children are auto-reaped and
+     *     wait4() returns ECHILD immediately — losing exit status. */
+    {
+        /* struct kernel_sigaction: handler, flags, restorer, mask */
+        long sa[4] = {0, 0, 0, 0};  /* SIG_DFL=0, no flags, no mask */
+        sc5(NR_rt_sigaction, SIGCHLD, (long)sa, 0, 8, 0);
+    }
+
+    /* 8b. Reap any inherited zombies before fork (bubblewrap pattern).
+     *     Prevents stale zombies from bash process substitution etc. */
+    { int s; while (sc5(NR_wait4, -1, (long)&s, WNOHANG, 0, 0) > 0); }
+
+    /* 8c. Fork: child execs target, parent stays as PID 1 init.
+     *     Reaps orphaned zombies — follows bubblewrap do_init() pattern. */
     long child_pid = sc5(NR_clone, SIGCHLD, 0, 0, 0, 0);
     if (child_pid < 0) {
         /* clone failed — fall back to direct exec (best effort) */
@@ -471,6 +485,12 @@ static void _main(long argc, char **argv, char **envp) {
      * Loops on wait4(-1) until ECHILD, propagates initial child's exit status.
      * This ensures orphaned processes are reaped instead of accumulating as
      * zombies, which bash-as-PID-1 does not reliably do. */
+
+    /* Close extra fds in init (bubblewrap close_extra_fds pattern).
+     * Init only needs wait4+exit — no stdin/stdout/pipes needed.
+     * Prevents fd leakage and ensures child's stdout EOF is detected. */
+    for (int fd = 3; fd < 1024; fd++)
+        sc1(NR_close, fd);
 
     /* Drop effective/permitted caps for init (bubblewrap drop_all_caps pattern).
      * PR_CAPBSET_DROP only affects the bounding set, NOT effective/permitted.
