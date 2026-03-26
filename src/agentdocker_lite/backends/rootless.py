@@ -213,6 +213,17 @@ class RootlessSandbox(RootfulSandbox):
             tmp_dir.mkdir(parents=True, exist_ok=True)
             (tmp_dir / ".adl_hostname").write_text(config.hostname + "\n")
 
+        # --- cap_add (extra capabilities to keep during cap drop) ---
+        if config.cap_add:
+            from agentdocker_lite.backends.base import cap_names_to_numbers
+            cap_nums = cap_names_to_numbers(config.cap_add)
+            if cap_nums:
+                tmp_dir = self._upper_dir / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_cap_add").write_text(
+                    "\n".join(str(n) for n in cap_nums) + "\n"
+                )
+
         # --- DNS ----------------------------------------------------------
         if config.dns:
             self._write_dns(config.dns)

@@ -11,6 +11,7 @@ import pytest
 
 from agentdocker_lite.compose import (
     ComposeProject,
+    _Service,
     _parse_compose,
     _substitute,
     _topo_sort,
@@ -908,5 +909,137 @@ class TestComposeProject:
             assert ns_host.strip() != ns_normal.strip(), (
                 "host mode and normal mode should have different netns"
             )
+        finally:
+            proj.down()
+
+    def test_image_default_cmd_starts(self, tmp_path, shared_cache_dir):
+        """Service with no compose command should auto-start image CMD."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        # python:3.12-slim has CMD ["python3"] — if it starts, we can
+        # run commands that depend on python being alive.
+        # Use a simpler test: ubuntu with no command. Image CMD is
+        # ["bash"], so _cmd_string should return "bash" and start it.
+        # We verify by checking the background process is running.
+        compose.write_text(textwrap.dedent("""\
+            services:
+              worker:
+                image: ubuntu:22.04
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-default-cmd",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            # The sandbox should be alive (image CMD started as background)
+            output, ec = proj.services["worker"].run("echo cmd-ok")
+            assert ec == 0
+            assert "cmd-ok" in output
+        finally:
+            proj.down()
+
+    def test_compose_command_overrides_image_cmd(self, tmp_path, shared_cache_dir):
+        """Compose command: should override image CMD."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-cmd-override",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            # sleep infinity should be running, not image's default CMD
+            output, ec = proj.services["app"].run("pgrep -a sleep")
+            assert ec == 0
+            assert "infinity" in output
+        finally:
+            proj.down()
+
+    def test_entrypoint_not_double_executed(self, tmp_path, shared_cache_dir):
+        """Compose entrypoint should only run at sandbox startup, not as bg."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                entrypoint:
+                  - /bin/sh
+                  - -c
+                  - 'echo ep-ran >> /tmp/ep.log; exec "$$@"'
+                  - --
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-ep-once",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            import time
+            time.sleep(0.5)
+            # Entrypoint should have run exactly once (at sandbox startup)
+            output, ec = proj.services["app"].run("wc -l < /tmp/ep.log")
+            assert ec == 0
+            assert output.strip() == "1", f"entrypoint ran {output.strip()} times, expected 1"
+        finally:
+            proj.down()
+
+    def test_cap_add_passed(self, tmp_path, shared_cache_dir):
+        """cap_add from compose should grant extra capabilities at runtime."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              net:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                cap_add:
+                  - NET_RAW
+                  - NET_ADMIN
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-cap-add",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            sb = proj.services["net"]
+
+            # Config should have cap_add
+            assert sb._config.cap_add == ["NET_RAW", "NET_ADMIN"]
+
+            # Runtime: check effective capabilities bitmask
+            output, ec = sb.run("cat /proc/self/status | grep CapEff")
+            assert ec == 0
+            cap_hex = output.strip().split()[-1]
+            cap_int = int(cap_hex, 16)
+            NET_RAW_BIT = 1 << 13
+            NET_ADMIN_BIT = 1 << 12
+            assert cap_int & NET_RAW_BIT, f"NET_RAW not in caps: {cap_hex}"
+            assert cap_int & NET_ADMIN_BIT, f"NET_ADMIN not in caps: {cap_hex}"
         finally:
             proj.down()

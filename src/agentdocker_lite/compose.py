@@ -510,6 +510,7 @@ class ComposeProject:
         )
         self._startup_order = _topo_sort(self._defs)
         self._image_map = self._resolve_image_map()
+        self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
         self._sandboxes: dict[str, Sandbox] = {}
         self._bg_handles: dict[str, str] = {}  # service → bg handle
         self._volume_dir: Optional[Path] = None
@@ -757,6 +758,12 @@ class ComposeProject:
     ) -> Sandbox:
         """Create a Sandbox for a single compose service."""
         image = self._resolve_image(svc)
+
+        # Fetch image config for CMD fallback (used by _cmd_string)
+        from agentdocker_lite.rootfs import get_image_config
+        img_cfg = get_image_config(image) or {}
+        self._image_cmds[svc.name] = img_cfg.get("cmd")
+
         volumes = self._resolve_volumes(svc)
 
         # Port mapping: only needed for non-host networking
@@ -815,6 +822,13 @@ class ComposeProject:
             config_kwargs["memory_max"] = svc.mem_limit
         if svc.memswap_limit:
             config_kwargs["memory_swap"] = svc.memswap_limit
+        # cap_add: merge explicit cap_add with privileged (all caps)
+        caps = list(svc.cap_add) if svc.cap_add else []
+        if svc.privileged:
+            from agentdocker_lite.backends.base import CAP_NAME_TO_NUM
+            caps = list(CAP_NAME_TO_NUM.keys())
+        if caps:
+            config_kwargs["cap_add"] = caps
         if svc.entrypoint:
             ep = svc.entrypoint
             if isinstance(ep, str):
@@ -842,8 +856,16 @@ class ComposeProject:
         sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
 
     def _cmd_string(self, svc: _Service) -> Optional[str]:
-        """Build the shell command to start a service."""
-        cmd = svc.command or svc.entrypoint
+        """Build the shell command to start a service.
+
+        Uses compose ``command:`` if set, otherwise falls back to the
+        image's default ``CMD``.  The entrypoint is NOT included here
+        — it already runs at sandbox startup as the shell wrapper.
+        """
+        cmd = svc.command
+        if cmd is None:
+            # Fall back to image's default CMD
+            cmd = self._image_cmds.get(svc.name)
         if cmd is None:
             return None
         if isinstance(cmd, list):
@@ -867,6 +889,31 @@ class ComposeProject:
                 parts.append(f"ulimit {flag}S {soft}; ulimit {flag}H {hard}")
         return "; ".join(parts)
 
+    @staticmethod
+    def _wrap_restart(cmd: str, policy: Optional[str]) -> str:
+        """Wrap a command with a restart loop based on compose restart policy.
+
+        Mimics Docker restart behaviour:
+        - Exponential backoff: 1s → 2s → 4s → ... → 30s (cap)
+        - Backoff resets if the process ran for more than 10 seconds
+          (indicates successful startup, transient crash later)
+        - ``on-failure``: only restart on non-zero exit
+        - ``always`` / ``unless-stopped``: restart unconditionally
+        """
+        if not policy or policy in ("no", "never", '"no"'):
+            return cmd
+        # on-failure: stop loop on exit 0
+        stop_on_ok = "[ $_rc -eq 0 ] && break; " if policy == "on-failure" else ""
+        return (
+            f"_d=1; while true; do "
+            f"SECONDS=0; {cmd}; _rc=$?; "
+            f"[ $SECONDS -gt 10 ] && _d=1; "  # reset backoff on long run
+            f"{stop_on_ok}"
+            f"sleep $_d; "
+            f"_d=$((_d<30?_d*2:30)); "  # exponential backoff, cap 30s
+            f"done"
+        )
+
     def _start_service(self, name: str, svc: _Service) -> None:
         """Start a service's command as a background process."""
         cmd = self._cmd_string(svc)
@@ -875,6 +922,9 @@ class ComposeProject:
         sb = self._sandboxes.get(name)
         if sb is None:
             return
+
+        # Apply restart policy
+        cmd = self._wrap_restart(cmd, svc.restart)
 
         # Apply ulimits before the service command
         prefix = self._ulimit_prefix(svc.ulimits)

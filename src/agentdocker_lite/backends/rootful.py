@@ -957,6 +957,17 @@ class RootfulSandbox(SandboxBase):
                 self._config.hostname + "\n"
             )
 
+        # cap_add (extra capabilities to keep during cap drop)
+        if self._config.cap_add:
+            from agentdocker_lite.backends.base import cap_names_to_numbers
+            cap_nums = cap_names_to_numbers(self._config.cap_add)
+            if cap_nums:
+                tmp_dir = target / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_cap_add").write_text(
+                    "\n".join(str(n) for n in cap_nums) + "\n"
+                )
+
     def _reset_btrfs(self):
         result = subprocess.run(
             ["btrfs", "subvolume", "delete", str(self._rootfs)],

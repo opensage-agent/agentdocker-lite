@@ -147,6 +147,8 @@ static void writes(const char *s) { sc3(NR_write, 2, (long)s, slen(s)); }
 /* ---- Security logic ---- */
 
 static const int keep_caps[] = {0,1,3,4,5,6,7,8,10,18,27,29,31,-1};
+static int extra_caps[64]; /* cap_add from /tmp/.adl_cap_add */
+static int n_extra_caps = 0;
 static const char *masked[] = {
     "/proc/kcore","/proc/keys","/proc/timer_list",
     "/proc/sched_debug","/sys/firmware","/proc/scsi",0
@@ -155,7 +157,36 @@ static const char *ro_paths[] = {
     "/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger",0
 };
 
-static int keep(int c) { for(int i=0;keep_caps[i]>=0;i++) if(keep_caps[i]==c) return 1; return 0; }
+static int keep(int c) {
+    for (int i = 0; keep_caps[i] >= 0; i++)
+        if (keep_caps[i] == c) return 1;
+    for (int i = 0; i < n_extra_caps; i++)
+        if (extra_caps[i] == c) return 1;
+    return 0;
+}
+
+/* Read /tmp/.adl_cap_add: newline-separated cap numbers (e.g. "13\n12\n") */
+static void load_extra_caps(void) {
+    int fd = sc2(NR_open, (long)"/tmp/.adl_cap_add", 0/*O_RDONLY*/);
+    if (fd < 0) return;
+    char buf[256];
+    long n = sc3(NR_read, fd, (long)buf, sizeof(buf) - 1);
+    sc1(NR_close, fd);
+    sc1(NR_unlink, (long)"/tmp/.adl_cap_add");
+    if (n <= 0) return;
+    buf[n] = 0;
+    int val = 0, has = 0;
+    for (int i = 0; i <= n; i++) {
+        if (buf[i] >= '0' && buf[i] <= '9') {
+            val = val * 10 + (buf[i] - '0');
+            has = 1;
+        } else if (has) {
+            if (val >= 0 && val <= 63 && n_extra_caps < 64)
+                extra_caps[n_extra_caps++] = val;
+            val = 0; has = 0;
+        }
+    }
+}
 
 /* ---- Landlock ---- */
 
@@ -379,7 +410,8 @@ static void _main(long argc, char **argv, char **envp) {
         }
     }
 
-    /* 2. Drop capabilities */
+    /* 2. Drop capabilities (after loading cap_add overrides) */
+    load_extra_caps();
     for (int c = 0; c <= 41; c++)
         if (!keep(c)) sc5(NR_prctl, PR_CAPBSET_DROP, c, 0, 0, 0);
 
