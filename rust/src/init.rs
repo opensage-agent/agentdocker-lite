@@ -64,6 +64,9 @@ pub struct SpawnResult {
     pub signal_w_fd_num: RawFd,
     pub master_fd: Option<RawFd>,
     pub pidfd: Option<RawFd>,
+    /// Read end of the error/warning pipe.  Python reads this after the
+    /// shell init signal to collect non-fatal warnings from child init.
+    pub err_r_fd: RawFd,
 }
 
 // ======================================================================
@@ -87,12 +90,39 @@ nix::ioctl_read_bad!(siocgifflags, libc::SIOCGIFFLAGS, libc::ifreq);
 nix::ioctl_write_ptr_bad!(siocsifflags, libc::SIOCSIFFLAGS, libc::ifreq);
 
 // ======================================================================
-// Helper: write error to pipe and exit (used in child after fork)
+// Helper: write error/warning to pipe (used in child after fork)
 // ======================================================================
 
+// Thread-local fd for the child error pipe.  Set once in the child
+// process right after fork; helpers use `init_warn_tl()` to write
+// non-fatal warnings without needing `err_w` threaded through every
+// function signature.
+std::thread_local! {
+    static ERR_W_FD: std::cell::Cell<RawFd> = const { std::cell::Cell::new(-1) };
+}
+
 fn init_fatal(err_w: RawFd, msg: &str) -> ! {
-    let _ = nix::unistd::write(borrow(err_w), msg.as_bytes());
+    let tagged = format!("F:{}", msg);
+    let _ = nix::unistd::write(borrow(err_w), tagged.as_bytes());
     unsafe { libc::_exit(1) };
+}
+
+/// Write a non-fatal warning to the error pipe (newline-terminated so
+/// the reader can split on `\n`).
+fn init_warn(err_w: RawFd, msg: &str) {
+    let tagged = format!("W:{}\n", msg);
+    let _ = nix::unistd::write(borrow(err_w), tagged.as_bytes());
+}
+
+/// Convenience: write a warning using the thread-local `ERR_W_FD`.
+/// Falls back to `log::warn!` if the fd hasn't been set (parent process).
+fn init_warn_tl(msg: &str) {
+    let fd = ERR_W_FD.with(|c| c.get());
+    if fd >= 0 {
+        init_warn(fd, msg);
+    } else {
+        log::warn!("{}", msg);
+    }
 }
 
 fn c(s: &str) -> CString {
@@ -162,7 +192,7 @@ fn mount_proc(rootfs: &str, net_isolate: bool) {
     let proc_path = format!("{}/proc", rootfs);
     let _ = std::fs::create_dir_all(&proc_path);
     if let Err(e) = mnt(Some("proc"), &proc_path, Some("proc"), MsFlags::empty(), None) {
-        log::warn!("mount /proc failed: {}", e);
+        init_warn_tl(&format!("mount /proc failed: {}", e));
     }
 
     if net_isolate {
@@ -181,7 +211,7 @@ fn setup_dev_rootful(rootfs: &str) {
     if let Err(e) = mnt(
         Some("tmpfs"), &dev, Some("tmpfs"), MsFlags::MS_NOSUID, Some("mode=0755"),
     ) {
-        log::warn!("mount tmpfs on /dev failed: {}", e);
+        init_warn_tl(&format!("mount tmpfs on /dev failed: {}", e));
     }
 
     let devices: &[(u32, u32, &str, u32)] = &[
@@ -206,7 +236,7 @@ fn setup_dev_rootless(rootfs: &str) {
     if let Err(e) = mnt(
         Some("tmpfs"), &dev, Some("tmpfs"), MsFlags::MS_NOSUID, Some("mode=0755"),
     ) {
-        log::warn!("mount tmpfs on /dev failed: {}", e);
+        init_warn_tl(&format!("mount tmpfs on /dev failed: {}", e));
     }
 
     for name in &["null", "zero", "full", "random", "urandom", "tty"] {
@@ -214,7 +244,7 @@ fn setup_dev_rootless(rootfs: &str) {
         let _ = std::fs::File::create(&target);
         let source = format!("/dev/{}", name);
         if let Err(e) = mnt(Some(&source), &target, None::<&str>, MsFlags::MS_BIND, None) {
-            log::warn!("bind mount /dev/{} failed: {}", name, e);
+            init_warn_tl(&format!("bind mount /dev/{} failed: {}", name, e));
         }
     }
     setup_dev_links(rootfs);
@@ -233,7 +263,7 @@ fn setup_dev_links(rootfs: &str) {
         Some("devpts"), &pts, Some("devpts"),
         MsFlags::MS_NOSUID, Some("newinstance,ptmxmode=0666"),
     ) {
-        log::warn!("mount devpts failed: {}", e);
+        init_warn_tl(&format!("mount devpts failed: {}", e));
     }
     let _ = std::os::unix::fs::symlink("pts/ptmx", format!("{}/ptmx", dev));
 
@@ -248,7 +278,7 @@ fn mount_shm(rootfs: &str, shm_size: Option<u64>) {
     let opts = format!("size={}", size);
     if let Err(e) = mnt(Some("tmpfs"), &shm, Some("tmpfs"), MsFlags::MS_NOSUID, Some(&opts))
     {
-        log::warn!("mount /dev/shm failed: {}", e);
+        init_warn_tl(&format!("mount /dev/shm failed: {}", e));
     }
 }
 
@@ -264,7 +294,7 @@ fn mount_devices(rootfs: &str, devices: &[String]) {
         }
         let _ = std::fs::File::create(&target);
         if let Err(e) = mnt(Some(dev_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
-            log::warn!("device bind mount {} failed: {}", dev_path, e);
+            init_warn_tl(&format!("device bind mount {} failed: {}", dev_path, e));
         }
     }
 }
@@ -289,13 +319,13 @@ fn mount_volumes(config: &SandboxSpawnConfig) {
                     let _ = std::fs::create_dir_all(&cow_work);
                     let opts = format!("lowerdir={},upperdir={},workdir={}", host_path, cow_upper, cow_work);
                     if let Err(e) = mnt(Some("overlay"), &target, Some("overlay"), MsFlags::empty(), Some(&opts)) {
-                        log::warn!("cow volume mount {} failed: {}", container_path, e);
+                        init_warn_tl(&format!("cow volume mount {} failed: {}", container_path, e));
                     }
                 }
             }
             "ro" => {
                 if let Err(e) = mnt(Some(host_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
-                    log::warn!("ro volume bind {} failed: {}", container_path, e);
+                    init_warn_tl(&format!("ro volume bind {} failed: {}", container_path, e));
                 } else if let Err(e) = mnt(
                     None::<&str>, &target, None::<&str>,
                     // In user namespaces the kernel locks MS_NOSUID|MS_NODEV on
@@ -304,12 +334,12 @@ fn mount_volumes(config: &SandboxSpawnConfig) {
                         | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
                     None,
                 ) {
-                    log::warn!("ro volume remount {} failed: {}", container_path, e);
+                    init_warn_tl(&format!("ro volume remount {} failed: {}", container_path, e));
                 }
             }
             _ => {
                 if let Err(e) = mnt(Some(host_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
-                    log::warn!("volume bind {} failed: {}", container_path, e);
+                    init_warn_tl(&format!("volume bind {} failed: {}", container_path, e));
                 }
             }
         }
@@ -327,7 +357,7 @@ fn mount_tmpfs(config: &SandboxSpawnConfig) {
             Some("tmpfs"), &target, Some("tmpfs"), MsFlags::empty(),
             if opts.is_empty() { None } else { Some(opts) },
         ) {
-            log::warn!("tmpfs mount {} failed: {}", path, e);
+            init_warn_tl(&format!("tmpfs mount {} failed: {}", path, e));
         }
     }
 }
@@ -358,10 +388,10 @@ fn fix_tmp_perms(rootfs: &str) {
 
 fn make_rootfs_readonly(rootfs: &str) {
     if let Err(e) = mnt(Some(rootfs), rootfs, None::<&str>, MsFlags::MS_BIND, None) {
-        log::warn!("rootfs bind for readonly failed: {}", e);
+        init_warn_tl(&format!("rootfs bind for readonly failed: {}", e));
     }
     if let Err(e) = mnt(None::<&str>, rootfs, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
-        log::warn!("rootfs readonly remount failed: {}", e);
+        init_warn_tl(&format!("rootfs readonly remount failed: {}", e));
     }
 }
 
@@ -381,13 +411,13 @@ fn precreate_volume_mountpoints(config: &SandboxSpawnConfig) {
 fn apply_security(config: &SandboxSpawnConfig) {
     if let Some(ref hostname) = config.hostname {
         if let Err(e) = unistd::sethostname(hostname) {
-            log::warn!("sethostname failed: {}", e);
+            init_warn_tl(&format!("sethostname failed: {}", e));
         }
     }
 
     match security::drop_capabilities(&config.cap_add) {
         Ok(n) => log::debug!("dropped {} capabilities", n),
-        Err(e) => log::warn!("cap_drop failed: {}", e),
+        Err(e) => init_warn_tl(&format!("cap_drop failed: {}", e)),
     }
 
     // Mask paths
@@ -399,7 +429,7 @@ fn apply_security(config: &SandboxSpawnConfig) {
             mnt(Some("/dev/null"), path, None::<&str>, MsFlags::MS_BIND, None)
         };
         if let Err(e) = result {
-            log::warn!("mask_path {} failed: {}", path, e);
+            init_warn_tl(&format!("mask_path {} failed: {}", path, e));
         }
     }
 
@@ -407,14 +437,14 @@ fn apply_security(config: &SandboxSpawnConfig) {
     for path in RO_PATHS {
         if mnt(Some(path), path, None::<&str>, MsFlags::MS_BIND, None).is_ok() {
             if let Err(e) = mnt(None::<&str>, path, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
-                log::warn!("readonly_path {} remount failed: {}", path, e);
+                init_warn_tl(&format!("readonly_path {} remount failed: {}", path, e));
             }
         }
     }
 
     if config.read_only {
         if let Err(e) = mnt(None::<&str>, "/", None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
-            log::warn!("read-only rootfs remount failed: {}", e);
+            init_warn_tl(&format!("read-only rootfs remount failed: {}", e));
         }
     }
 
@@ -431,14 +461,14 @@ fn apply_security(config: &SandboxSpawnConfig) {
             &config.landlock_ports, config.landlock_strict,
         ) {
             Ok(true) => log::debug!("landlock applied"),
-            Ok(false) => log::warn!("landlock not available"),
-            Err(e) => log::warn!("landlock failed: {}", e),
+            Ok(false) => init_warn_tl("landlock not available"),
+            Err(e) => init_warn_tl(&format!("landlock failed: {}", e)),
         }
     }
 
     if config.seccomp {
         if let Err(e) = security::apply_seccomp_filter() {
-            log::warn!("seccomp failed: {}", e);
+            init_warn_tl(&format!("seccomp failed: {}", e));
         }
     }
 }
@@ -447,8 +477,26 @@ fn apply_security(config: &SandboxSpawnConfig) {
 // Pasta networking
 // ======================================================================
 
-fn setup_pasta_networking(pasta_bin: &str, env_dir: &str, port_map: &[String], ipv6: bool) {
-    let netns_file = format!("{}/.netns", env_dir);
+/// Set up pasta networking: create a new network namespace, start pasta, enter it.
+///
+/// `pasta_bin`: path to pasta binary (may need `host_prefix` prepended in rootful mode)
+/// `env_dir`: sandbox env directory for the `.netns` file
+/// `host_prefix`: prepended to `pasta_bin` and `env_dir` paths to reach host filesystem
+///   (e.g. `"/.pivot_old"` in rootful mode after pivot_root, `""` in userns mode)
+fn setup_pasta_networking(
+    pasta_bin: &str, env_dir: &str, port_map: &[String], ipv6: bool, host_prefix: &str,
+) {
+    let actual_pasta = if host_prefix.is_empty() {
+        pasta_bin.to_string()
+    } else {
+        format!("{}{}", host_prefix, pasta_bin)
+    };
+    let actual_env_dir = if host_prefix.is_empty() {
+        env_dir.to_string()
+    } else {
+        format!("{}{}", host_prefix, env_dir)
+    };
+    let netns_file = format!("{}/.netns", actual_env_dir);
     let _ = std::fs::File::create(&netns_file);
 
     // 1. Create new netns via fork + unshare(CLONE_NEWNET) + bind mount
@@ -468,6 +516,11 @@ fn setup_pasta_networking(pasta_bin: &str, env_dir: &str, port_map: &[String], i
 
     // 2. Start pasta
     let mut args: Vec<String> = vec!["--config-net".into()];
+    // When running as root, pasta drops to 'nobody' by default — which then
+    // can't setns. Tell it to stay as root.
+    if rustix::process::geteuid().is_root() {
+        args.extend(["--runas".into(), "0:0".into()]);
+    }
     if !ipv6 { args.push("--ipv4-only".into()); }
     for m in port_map { args.extend(["-t".into(), m.clone()]); }
     args.extend(["-u", "none", "-T", "none", "-U", "none",
@@ -476,11 +529,11 @@ fn setup_pasta_networking(pasta_bin: &str, env_dir: &str, port_map: &[String], i
     args.push(netns_file.clone());
     args.extend(["--map-guest-addr", "169.254.1.2"].iter().map(|s| s.to_string()));
 
-    match std::process::Command::new(pasta_bin).args(&args).output() {
+    match std::process::Command::new(&actual_pasta).args(&args).output() {
         Ok(out) if !out.status.success() => {
-            log::warn!("pasta exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr));
+            init_warn_tl(&format!("pasta exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr)));
         }
-        Err(e) => log::warn!("pasta spawn failed: {}", e),
+        Err(e) => init_warn_tl(&format!("pasta spawn failed: {}", e)),
         _ => {}
     }
 
@@ -488,10 +541,10 @@ fn setup_pasta_networking(pasta_bin: &str, env_dir: &str, port_map: &[String], i
     if let Ok(ns_file) = std::fs::File::open(&netns_file) {
         let fd = unsafe { BorrowedFd::borrow_raw(ns_file.as_raw_fd()) };
         if let Err(e) = nix::sched::setns(fd, CloneFlags::CLONE_NEWNET) {
-            log::warn!("setns into netns failed: {}", e);
+            init_warn_tl(&format!("setns into netns failed: {}", e));
         }
     } else {
-        log::warn!("open netns file {} failed", netns_file);
+        init_warn_tl(&format!("open netns file {} failed", netns_file));
     }
 
     // 4. Bring up loopback via nix ioctl
@@ -517,7 +570,10 @@ fn setup_pasta_networking(pasta_bin: &str, env_dir: &str, port_map: &[String], i
 // Pivot root (rootful mode)
 // ======================================================================
 
-fn do_pivot_root_rootful(rootfs: &str) -> io::Result<()> {
+/// Phase 1: pivot_root into `rootfs`, leaving `/.pivot_old` mounted.
+/// Call `cleanup_pivot_old()` once device/volume mounts that need the old
+/// root are done.
+fn do_pivot_root_phase1(rootfs: &str) -> io::Result<()> {
     mnt(None::<&str>, "/", None::<&str>, MsFlags::MS_SLAVE | MsFlags::MS_REC, None)?;
     mnt(Some(rootfs), rootfs, None::<&str>, MsFlags::MS_BIND, None)?;
 
@@ -530,16 +586,121 @@ fn do_pivot_root_rootful(rootfs: &str) -> io::Result<()> {
     rustix::process::chdir("/")?;
 
     if let Err(e) = mnt(None::<&str>, "/.pivot_old", None::<&str>, MsFlags::MS_SLAVE | MsFlags::MS_REC, None) {
-        log::warn!("pivot_old rslave failed: {}", e);
+        init_warn_tl(&format!("pivot_old rslave failed: {}", e));
     }
+
+    Ok(())
+}
+
+/// Phase 2: detach and remove `/.pivot_old`.
+fn cleanup_pivot_old() {
     if let Err(e) = umnt("/.pivot_old", MntFlags::MNT_DETACH) {
-        log::warn!("pivot_old umount failed: {}", e);
+        init_warn_tl(&format!("pivot_old umount failed: {}", e));
     }
     if let Err(e) = std::fs::remove_dir("/.pivot_old") {
         log::debug!("pivot_old rmdir failed: {}", e);
     }
+}
 
-    Ok(())
+/// Bind-mount host devices (e.g. `/dev/fuse`) into `rootfs/dev/`.
+/// `old_root` is the path to the old root mount (e.g. `/.pivot_old`).
+/// Must be called BEFORE `cleanup_pivot_old()`.
+fn mount_devices_from_old_root(rootfs: &str, old_root: &str, devices: &[String]) {
+    for dev_path in devices {
+        let dev_name = dev_path.trim_start_matches('/');
+        let target = format!("{}/{}", rootfs, dev_name);
+        // Ensure parent directory exists (e.g. /dev)
+        if let Some(parent) = Path::new(dev_name).parent() {
+            let ps = parent.to_string_lossy();
+            if !ps.is_empty() && ps != "." {
+                let _ = std::fs::create_dir_all(format!("{}/{}", rootfs, ps));
+            }
+        }
+        let _ = std::fs::File::create(&target);
+        // Use the host device path relative to old_root
+        let source = format!("{}/{}", old_root, dev_name);
+        if let Err(e) = mnt(Some(&source), &target, None::<&str>, MsFlags::MS_BIND, None) {
+            init_warn_tl(&format!("device bind mount {} from old root failed: {}", dev_path, e));
+        }
+    }
+}
+
+/// Mount volumes at an explicit rootfs path (used after pivot_root in
+/// rootful mode where the new rootfs is `/`).
+///
+/// `host_prefix`: if non-empty, prepend to host paths. In rootful mode
+/// after pivot_root, the old host root lives at `/.pivot_old`, so pass
+/// `"/.pivot_old"` here and this function will resolve host paths like
+/// `/tmp/foo` to `/.pivot_old/tmp/foo`.
+fn mount_volumes_at(volumes: &[String], rootfs: &str, env_dir: Option<&str>, host_prefix: &str) {
+    for spec in volumes {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() < 2 { continue; }
+        let raw_host_path = parts[0];
+        let container_path = parts[1];
+        let mode = if parts.len() > 2 { parts[2] } else { "rw" };
+        let target = format!("{}/{}", rootfs, container_path.trim_start_matches('/'));
+        let _ = std::fs::create_dir_all(&target);
+
+        // Resolve host path through the old root if a prefix is given.
+        let host_path_owned;
+        let host_path = if !host_prefix.is_empty() {
+            host_path_owned = format!("{}/{}", host_prefix, raw_host_path.trim_start_matches('/'));
+            host_path_owned.as_str()
+        } else {
+            raw_host_path
+        };
+
+        match mode {
+            "cow" => {
+                if let Some(ed) = env_dir {
+                    let safe = container_path.replace('/', "_").trim_matches('_').to_string();
+                    let cow_upper = format!("{}/cow_{}_upper", ed, safe);
+                    let cow_work = format!("{}/cow_{}_work", ed, safe);
+                    let _ = std::fs::create_dir_all(&cow_upper);
+                    let _ = std::fs::create_dir_all(&cow_work);
+                    let opts = format!("lowerdir={},upperdir={},workdir={}", host_path, cow_upper, cow_work);
+                    if let Err(e) = mnt(Some("overlay"), &target, Some("overlay"), MsFlags::empty(), Some(&opts)) {
+                        init_warn_tl(&format!("cow volume mount {} failed: {}", container_path, e));
+                    }
+                }
+            }
+            "ro" => {
+                if let Err(e) = mnt(Some(host_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
+                    init_warn_tl(&format!("ro volume bind {} failed: {}", container_path, e));
+                } else if let Err(e) = mnt(
+                    None::<&str>, &target, None::<&str>,
+                    MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                    None,
+                ) {
+                    init_warn_tl(&format!("ro volume remount {} failed: {}", container_path, e));
+                }
+            }
+            _ => {
+                if let Err(e) = mnt(Some(host_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
+                    init_warn_tl(&format!("volume bind {} failed: {}", container_path, e));
+                }
+            }
+        }
+    }
+}
+
+/// Mount tmpfs mounts at an explicit rootfs path (used after pivot_root in
+/// rootful mode).
+fn mount_tmpfs_at(tmpfs_mounts: &[String], rootfs: &str) {
+    for spec in tmpfs_mounts {
+        let parts: Vec<&str> = spec.splitn(2, ':').collect();
+        let path = parts[0];
+        let opts = if parts.len() > 1 { parts[1] } else { "" };
+        let target = format!("{}/{}", rootfs, path.trim_start_matches('/'));
+        let _ = std::fs::create_dir_all(&target);
+        if let Err(e) = mnt(
+            Some("tmpfs"), &target, Some("tmpfs"), MsFlags::empty(),
+            if opts.is_empty() { None } else { Some(opts) },
+        ) {
+            init_warn_tl(&format!("tmpfs mount {} failed: {}", path, e));
+        }
+    }
 }
 
 // ======================================================================
@@ -600,7 +761,9 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
         Err(e) => return Err(io::Error::from(e)),
         Ok(ForkResult::Child) => {
             // === CHILD A ===
-            rustix::process::setsid().ok();
+            // NOTE: setsid() is now called in child_init (PID 1 of the new
+            // PID namespace) so that CRIU can dump it without the
+            // "session leader outside pid namespace" error.
 
             // Redirect stdin/stdout via nix typed API (borrow raw fds)
             let _ = unistd::dup2_stdin(borrow(stdin_r));
@@ -772,9 +935,11 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             }
 
             // Non-blocking error pipe check.
+            // Fatal messages are prefixed with "F:", warnings with "W:".
             // If child already exec'd → EOF (CLOEXEC closed err_w) → n=0.
             // If child still initializing → EAGAIN → treat as success (init_script will catch failures).
-            // If child wrote error → n>0 → report immediately.
+            // If child wrote a fatal error → kill child and report.
+            // Otherwise, keep err_r open and return it so Python can read warnings later.
             {
                 // Set non-blocking
                 let _ = nix::fcntl::fcntl(
@@ -787,16 +952,36 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
                     Err(nix::Error::EAGAIN) => 0, // child still running, not an error
                     Err(_) => 0,
                 };
-                let _ = nix::unistd::close(err_r);
                 if n > 0 {
                     let msg = String::from_utf8_lossy(&err_buf[..n]);
-                    let _ = nix::sys::signal::kill(Pid::from_raw(child_pid), nix::sys::signal::Signal::SIGKILL);
-                    let _ = nix::sys::wait::waitpid(Pid::from_raw(child_pid), None);
-                    let _ = nix::unistd::close(stdin_w);
-                    let _ = nix::unistd::close(stdout_r);
-                    let _ = nix::unistd::close(signal_r);
-                    if let Some(mfd) = master_fd { let _ = nix::unistd::close(mfd); }
-                    return Err(io::Error::new(io::ErrorKind::Other, format!("sandbox init failed: {}", msg)));
+                    // Check if any line is a fatal error (F: prefix).
+                    // The buffer may contain W: warnings before the fatal.
+                    let has_fatal = msg.lines().any(|l| l.starts_with("F:"));
+                    if has_fatal {
+                        let _ = nix::unistd::close(err_r);
+                        // Extract the fatal message and any preceding warnings
+                        let detail: String = msg.lines()
+                            .filter_map(|l| {
+                                if l.starts_with("F:") { Some(l.trim_start_matches("F:").to_string()) }
+                                else if l.starts_with("W:") { Some(format!("[warn] {}", l.trim_start_matches("W:"))) }
+                                else if !l.is_empty() { Some(l.to_string()) }
+                                else { None }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let _ = nix::sys::signal::kill(Pid::from_raw(child_pid), nix::sys::signal::Signal::SIGKILL);
+                        let _ = nix::sys::wait::waitpid(Pid::from_raw(child_pid), None);
+                        let _ = nix::unistd::close(stdin_w);
+                        let _ = nix::unistd::close(stdout_r);
+                        let _ = nix::unistd::close(signal_r);
+                        if let Some(mfd) = master_fd { let _ = nix::unistd::close(mfd); }
+                        return Err(io::Error::new(io::ErrorKind::Other, format!("sandbox init failed: {}", detail)));
+                    }
+                    // Non-fatal data read — warnings are still in the pipe.
+                    // We consumed some data; that's fine, Python will read the rest.
+                    // But we can't un-read, so we accept loss of early warnings that
+                    // were already buffered at this point.  In practice the parent
+                    // reaches here before the child has written anything (EAGAIN).
                 }
             }
 
@@ -810,6 +995,7 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
                 signal_w_fd_num: signal_w,
                 master_fd,
                 pidfd: pidfd_val,
+                err_r_fd: err_r,
             })
         }
     }
@@ -820,14 +1006,44 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
 // ======================================================================
 
 fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
+    // Store err_w in thread-local so helper functions can write warnings
+    // without needing the fd threaded through every signature.
+    ERR_W_FD.with(|c| c.set(err_w));
+
+    // Create a new session inside the sandbox so that the shell (PID 1 in
+    // its namespace) becomes its own session leader.  This is required for
+    // CRIU: if the session leader lives outside the PID namespace that CRIU
+    // is asked to dump, criu dump aborts with "session leader outside pid
+    // namespace".  Moving setsid() here (into PID 1 of the namespace, not
+    // the outer helper process) avoids that.
+    rustix::process::setsid().ok();
+
     if config.rootful {
-        if let Err(e) = do_pivot_root_rootful(&config.rootfs) {
+        if let Err(e) = do_pivot_root_phase1(&config.rootfs) {
             init_fatal(err_w, &format!("pivot_root failed: {}", e));
         }
         mount_proc("/", config.net_isolate);
         setup_dev_rootful("/");
         mount_shm("/", config.shm_size);
-        mount_devices("/", &config.devices);
+        // Mount host devices from /.pivot_old BEFORE we detach it.
+        mount_devices_from_old_root("/", "/.pivot_old", &config.devices);
+        // Mount volumes BEFORE detaching the old root: host paths in volume
+        // specs (e.g. "/tmp/mydata") are accessible as
+        // "/.pivot_old/tmp/mydata" while /.pivot_old is still attached.
+        // env_dir also lives in the old root, needed for COW upper/work dirs.
+        let env_dir_str = config.env_dir.as_deref();
+        let env_dir_in_old_root = env_dir_str.map(|ed| {
+            format!("/.pivot_old/{}", ed.trim_start_matches('/'))
+        });
+        mount_volumes_at(
+            &config.volumes, "/",
+            env_dir_in_old_root.as_deref(),
+            "/.pivot_old",
+        );
+        // Now detach old root.
+        cleanup_pivot_old();
+        // Mount tmpfs inside the new root (no host paths, can be after cleanup).
+        mount_tmpfs_at(&config.tmpfs_mounts, "/");
         apply_security(config);
     } else {
         if let Err(e) = mount_overlay_fs(config) {
@@ -846,7 +1062,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
 
         if !config.port_map.is_empty() {
             if let (Some(pb), Some(ed)) = (&config.pasta_bin, &config.env_dir) {
-                setup_pasta_networking(pb, ed, &config.port_map, config.ipv6);
+                setup_pasta_networking(pb, ed, &config.port_map, config.ipv6, "");
             }
         }
 

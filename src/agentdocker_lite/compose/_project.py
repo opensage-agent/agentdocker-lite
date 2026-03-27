@@ -1,8 +1,4 @@
-"""Docker Compose compatibility layer.
-
-Parses ``docker-compose.yml`` files and manages each service as an
-agentdocker-lite :class:`Sandbox`.  Supports the subset of the Compose
-spec used by real-world projects (DecodingTrust-Agent, etc.).
+"""ComposeProject: manage a docker-compose.yml as a set of agentdocker-lite sandboxes.
 
 Usage::
 
@@ -24,450 +20,15 @@ import re
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-import yaml
-
-from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
+from agentdocker_lite.config import SandboxConfig
 from agentdocker_lite.sandbox import Sandbox
+from agentdocker_lite.compose._parse import _Service, _parse_compose, _topo_sort
+from agentdocker_lite.compose._network import SharedNetwork, _parse_duration, _healthcheck_cmd
 
 logger = logging.getLogger(__name__)
-
-# ------------------------------------------------------------------ #
-#  Variable substitution                                               #
-# ------------------------------------------------------------------ #
-
-# Matches ${VAR}, ${VAR:-default}, ${VAR-default}, and $$
-_VAR_RE = re.compile(r"\$\$|\$\{([^}]+)\}|\$([A-Za-z_]\w*)")
-
-
-def _substitute(text: str, env: dict[str, str]) -> str:
-    """Resolve ``${VAR:-default}`` patterns in *text*."""
-
-    def _repl(m: re.Match) -> str:
-        if m.group(0) == "$$":
-            return "$"
-        name: str = m.group(1) or m.group(2) or ""
-        # Handle ${VAR:-default} and ${VAR-default}
-        for sep in (":-", "-"):
-            if sep in name:
-                var, default = name.split(sep, 1)
-                return env.get(var, default)
-        return env.get(name, "")
-
-    return _VAR_RE.sub(_repl, text)
-
-
-def _sub_value(value: Any, env: dict[str, str]) -> Any:
-    """Recursively substitute variables in strings, lists, dicts."""
-    if isinstance(value, str):
-        return _substitute(value, env)
-    if isinstance(value, list):
-        return [_sub_value(v, env) for v in value]
-    if isinstance(value, dict):
-        return {k: _sub_value(v, env) for k, v in value.items()}
-    return value
-
-
-# ------------------------------------------------------------------ #
-#  Compose parser                                                      #
-# ------------------------------------------------------------------ #
-
-
-@dataclass
-class _Service:
-    """Parsed service definition."""
-
-    name: str
-    image: Optional[str] = None
-    build: Optional[dict] = None
-    command: Optional[str | list] = None
-    entrypoint: Optional[str | list] = None
-    environment: dict[str, str] = field(default_factory=dict)
-    volumes: list[str] = field(default_factory=list)
-    ports: list[str] = field(default_factory=list)
-    devices: list[str] = field(default_factory=list)
-    depends_on: list[str] = field(default_factory=list)
-    healthcheck: Optional[dict] = None
-    network_mode: Optional[str] = None
-    dns: Optional[list[str]] = None
-    hostname: Optional[str] = None
-    working_dir: Optional[str] = None
-    restart: Optional[str] = None
-    security_opt: list[str] = field(default_factory=list)
-    cap_add: list[str] = field(default_factory=list)
-    privileged: bool = False
-    stop_grace_period: Optional[str] = None
-    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
-    # maps resource name → (soft, hard), e.g. {"nofile": (65535, 65535)}
-    networks: list[str] = field(default_factory=list)
-    # compose networks this service belongs to (empty → "default")
-    shm_size: Optional[str] = None
-    tmpfs: list[str] = field(default_factory=list)
-    cpu_shares: Optional[int] = None
-    mem_limit: Optional[str] = None
-    memswap_limit: Optional[str] = None
-
-
-def _parse_environment(raw: Any) -> dict[str, str]:
-    """Parse environment from list or dict format."""
-    if isinstance(raw, dict):
-        return {k: str(v) if v is not None else "" for k, v in raw.items()}
-    if isinstance(raw, list):
-        env: dict[str, str] = {}
-        for item in raw:
-            item = str(item)
-            if "=" in item:
-                k, v = item.split("=", 1)
-                env[k] = v
-            else:
-                env[item] = os.environ.get(item, "")
-        return env
-    return {}
-
-
-def _parse_depends_on(raw: Any) -> list[str]:
-    """Parse depends_on from list or dict format."""
-    if isinstance(raw, list):
-        return list(raw)
-    if isinstance(raw, dict):
-        return list(raw.keys())
-    return []
-
-
-def _parse_ulimits(raw: Any) -> dict[str, tuple[int, int]]:
-    """Parse ulimits from compose format.
-
-    Supports both ``nproc: 65535`` (single value) and
-    ``nofile: {soft: 65535, hard: 65535}`` (dict) forms.
-    """
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[str, tuple[int, int]] = {}
-    for name, val in raw.items():
-        if isinstance(val, dict):
-            soft = int(val.get("soft", val.get("hard", 0)))
-            hard = int(val.get("hard", soft))
-            result[name] = (soft, hard)
-        else:
-            v = int(val)
-            result[name] = (v, v)
-    return result
-
-
-def _parse_ports(raw: Any) -> list[str]:
-    """Parse ports into ``host:container`` strings."""
-    if not raw:
-        return []
-    result: list[str] = []
-    for p in raw:
-        p = str(p)
-        # Strip protocol suffix for port_map (pasta handles TCP)
-        p = re.sub(r"/(tcp|udp)$", "", p)
-        result.append(p)
-    return result
-
-
-# Fields we parse and map to SandboxConfig
-_SUPPORTED_SERVICE_KEYS = frozenset({
-    "image", "build", "command", "entrypoint", "environment",
-    "volumes", "ports", "devices", "depends_on", "healthcheck",
-    "network_mode", "dns", "hostname", "working_dir", "restart",
-    "security_opt", "cap_add", "privileged", "stop_grace_period",
-    "ulimits", "shm_size", "tmpfs", "cpu_shares",
-    "mem_limit", "memswap_limit", "env_file",
-    # Parsed but not mapped (informational / ignored safely)
-    "container_name", "profiles", "stdin_open", "tty",
-    "extra_hosts", "labels", "logging",
-    # Not needed: host networking replaces custom networks
-    "networks",
-})
-
-
-def _parse_env_file(filepath: Path) -> dict[str, str]:
-    """Parse a Docker-style env file into a dict.
-
-    Supports ``VAR=VAL``, ``VAR:VAL``, ``VAR=`` (empty), and ``VAR``
-    (inherit from host).  Lines starting with ``#`` are comments.
-    Quotes (single/double) around values are stripped.
-    """
-    env: dict[str, str] = {}
-    if not filepath.exists():
-        logger.warning("env_file not found: %s", filepath)
-        return env
-    for line in filepath.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Docker supports both = and : as delimiters
-        for delim in ("=", ":"):
-            if delim in line:
-                k, _, v = line.partition(delim)
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                    v = v[1:-1]
-                env[k.strip()] = v
-                break
-        else:
-            # No delimiter — inherit from host environment
-            env[line] = os.environ.get(line, "")
-    return env
-
-
-def _parse_compose(
-    compose_file: Path,
-    env: dict[str, str],
-) -> tuple[dict[str, _Service], list[str]]:
-    """Parse a docker-compose.yml and return (services, named_volumes).
-
-    Warns on unsupported service-level fields.
-    """
-    text = compose_file.read_text()
-    # Substitute variables in the raw YAML text
-    text = _substitute(text, env)
-    data = yaml.safe_load(text) or {}
-
-    services_raw = data.get("services", {})
-    named_volumes = list((data.get("volumes") or {}).keys())
-
-    services: dict[str, _Service] = {}
-    for name, svc in services_raw.items():
-        if not isinstance(svc, dict):
-            continue
-
-        # Reject unsupported fields
-        unsupported = [k for k in svc if k not in _SUPPORTED_SERVICE_KEYS]
-        if unsupported:
-            raise ValueError(
-                f"service {name!r}: unsupported compose fields: "
-                f"{', '.join(sorted(unsupported))}. "
-                f"Supported: {', '.join(sorted(_SUPPORTED_SERVICE_KEYS))}"
-            )
-
-        # Resolve env_file: load from file(s), then override with explicit env
-        env_from_file: dict[str, str] = {}
-        raw_env_file = svc.get("env_file")
-        if raw_env_file:
-            if isinstance(raw_env_file, str):
-                raw_env_file = [raw_env_file]
-            for ef in raw_env_file:
-                env_from_file.update(_parse_env_file(compose_file.parent / ef))
-        merged_env = {**env_from_file, **_parse_environment(svc.get("environment"))}
-
-        # Parse tmpfs: can be string or list
-        raw_tmpfs = svc.get("tmpfs")
-        if isinstance(raw_tmpfs, str):
-            raw_tmpfs = [raw_tmpfs]
-        tmpfs_list = [str(t) for t in (raw_tmpfs or [])]
-
-        services[name] = _Service(
-            name=name,
-            image=svc.get("image"),
-            build=svc.get("build") if isinstance(svc.get("build"), dict) else (
-                {"context": svc["build"]} if svc.get("build") else None
-            ),
-            command=svc.get("command"),
-            entrypoint=svc.get("entrypoint"),
-            environment=merged_env,
-            volumes=[str(v) for v in (svc.get("volumes") or [])],
-            ports=_parse_ports(svc.get("ports")),
-            devices=[str(d) for d in (svc.get("devices") or [])],
-            depends_on=_parse_depends_on(svc.get("depends_on")),
-            healthcheck=svc.get("healthcheck"),
-            network_mode=svc.get("network_mode"),
-            dns=svc.get("dns"),
-            hostname=svc.get("hostname"),
-            working_dir=svc.get("working_dir"),
-            restart=svc.get("restart"),
-            security_opt=[str(s) for s in (svc.get("security_opt") or [])],
-            cap_add=[str(c) for c in (svc.get("cap_add") or [])],
-            privileged=bool(svc.get("privileged")),
-            stop_grace_period=svc.get("stop_grace_period"),
-            ulimits=_parse_ulimits(svc.get("ulimits")),
-            networks=list(svc["networks"]) if isinstance(svc.get("networks"), (list, dict)) else [],
-            shm_size=svc.get("shm_size"),
-            tmpfs=tmpfs_list,
-            cpu_shares=int(svc["cpu_shares"]) if svc.get("cpu_shares") else None,
-            mem_limit=svc.get("mem_limit"),
-            memswap_limit=svc.get("memswap_limit"),
-        )
-
-    return services, named_volumes
-
-
-def _topo_sort(services: dict[str, _Service]) -> list[str]:
-    """Topological sort by depends_on (depth-first)."""
-    visited: set[str] = set()
-    order: list[str] = []
-
-    def _visit(name: str) -> None:
-        if name in visited:
-            return
-        visited.add(name)
-        svc = services.get(name)
-        if svc:
-            for dep in svc.depends_on:
-                _visit(dep)
-        order.append(name)
-
-    for name in services:
-        _visit(name)
-    return order
-
-
-# ------------------------------------------------------------------ #
-#  Shared network namespace (Podman-style pod networking)               #
-# ------------------------------------------------------------------ #
-
-
-class SharedNetwork:
-    """Shared userns + netns for compose network isolation.
-
-    Creates a sentinel process that holds a user namespace (with full
-    uid mapping) and a network namespace.  Other sandboxes join the
-    sentinel's namespaces via ``nsenter``.
-
-    This mirrors Podman's pod infra container: one shared userns+netns
-    per pod, individual mount/pid namespaces per container.
-    """
-
-    def __init__(self, name: str = "default") -> None:
-        import subprocess as _subprocess
-
-        self.name = name
-        # Detect subuid range (reuse rootless sandbox logic)
-        from agentdocker_lite.backends.rootless import RootlessSandbox
-        self._subuid_range = RootlessSandbox._detect_subuid_range()
-
-        # Create sentinel with userns + netns
-        unshare_cmd = ["unshare", "--user", "--net", "--fork"]
-        if not self._subuid_range:
-            unshare_cmd.insert(2, "--map-root-user")
-        unshare_cmd.extend(["--", "sleep", "infinity"])
-
-        self._sentinel = _subprocess.Popen(
-            unshare_cmd,
-            start_new_session=True,
-            stdout=_subprocess.DEVNULL,
-            stderr=_subprocess.DEVNULL,
-        )
-
-        try:
-            # Wait for child to enter new userns
-            if self._subuid_range:
-                my_userns = os.readlink("/proc/self/ns/user")
-                for _ in range(1000):
-                    try:
-                        child_userns = os.readlink(
-                            f"/proc/{self._sentinel.pid}/ns/user"
-                        )
-                        if child_userns != my_userns:
-                            break
-                    except (FileNotFoundError, PermissionError):
-                        pass
-                    time.sleep(0.001)
-                else:
-                    raise RuntimeError("Timeout waiting for sentinel userns")
-
-                # Set up full uid/gid mapping
-                outer_uid, sub_start, sub_count = self._subuid_range
-                outer_gid = os.getgid()
-                pid = self._sentinel.pid
-                _subprocess.run(
-                    ["newuidmap", str(pid),
-                     "0", str(outer_uid), "1",
-                     "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True,
-                )
-                _subprocess.run(
-                    ["newgidmap", str(pid),
-                     "0", str(outer_gid), "1",
-                     "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True,
-                )
-        except Exception:
-            self.destroy()
-            raise
-
-    @property
-    def userns_path(self) -> str:
-        """Path to the sentinel's user namespace."""
-        return f"/proc/{self._sentinel.pid}/ns/user"
-
-    @property
-    def netns_path(self) -> str:
-        """Path to the sentinel's network namespace."""
-        return f"/proc/{self._sentinel.pid}/ns/net"
-
-    @property
-    def alive(self) -> bool:
-        return self._sentinel.poll() is None
-
-    def destroy(self) -> None:
-        """Kill the sentinel, releasing the shared namespaces."""
-        if self._sentinel.poll() is None:
-            import signal as _signal
-            try:
-                os.killpg(self._sentinel.pid, _signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                try:
-                    self._sentinel.kill()
-                except Exception:
-                    pass
-            try:
-                self._sentinel.wait(timeout=5)
-            except Exception:
-                pass
-
-    def __repr__(self) -> str:
-        state = "alive" if self.alive else "dead"
-        return f"SharedNetwork({self.name!r}, {state})"
-
-
-# ------------------------------------------------------------------ #
-#  Duration parsing                                                    #
-# ------------------------------------------------------------------ #
-
-
-def _parse_duration(s: str | int | float) -> float:
-    """Parse compose duration string (e.g. ``"30s"``, ``"2m"``) to seconds."""
-    if isinstance(s, (int, float)):
-        return float(s)
-    s = str(s).strip()
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*(s|ms|m|h)?$", s)
-    if not m:
-        return 30.0
-    val = float(m.group(1))
-    unit = m.group(2) or "s"
-    return val * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
-
-
-# ------------------------------------------------------------------ #
-#  Health check                                                        #
-# ------------------------------------------------------------------ #
-
-
-def _healthcheck_cmd(test: Any) -> str:
-    """Convert healthcheck test to a shell command string."""
-    if isinstance(test, str):
-        return test
-    if isinstance(test, list) and test:
-        if test[0] == "CMD":
-            return shlex.join(test[1:])
-        if test[0] == "CMD-SHELL":
-            return " ".join(test[1:])
-        # NONE disables
-        if test[0] == "NONE":
-            return ""
-        return shlex.join(test)
-    return ""
-
-
-# ------------------------------------------------------------------ #
-#  ComposeProject                                                      #
-# ------------------------------------------------------------------ #
 
 
 class ComposeProject:
@@ -491,10 +52,10 @@ class ComposeProject:
         self,
         compose_file: str | Path,
         *,
-        project_name: Optional[str] = None,
-        env: Optional[dict[str, str]] = None,
-        env_base_dir: Optional[str] = None,
-        rootfs_cache_dir: Optional[str] = None,
+        project_name: str | None = None,
+        env: dict[str, str] | None = None,
+        env_base_dir: str | None = None,
+        rootfs_cache_dir: str | None = None,
     ) -> None:
         self._compose_file = Path(compose_file).resolve()
         if not self._compose_file.exists():
@@ -512,16 +73,16 @@ class ComposeProject:
         self._image_map = self._resolve_image_map()
         self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
         self._image_entrypoints: dict[str, list[str] | None] = {}  # service → image ENTRYPOINT
-        self._sandboxes: dict[str, SandboxBase] = {}
+        self._sandboxes: dict[str, Sandbox] = {}
         self._bg_handles: dict[str, str] = {}  # service → bg handle
-        self._volume_dir: Optional[Path] = None
+        self._volume_dir: Path | None = None
         # network name → SharedNetwork instance
         self._shared_nets: dict[str, SharedNetwork] = {}
 
     # -- public API ---------------------------------------------------- #
 
     @property
-    def services(self) -> dict[str, SandboxBase]:
+    def services(self) -> dict[str, Sandbox]:
         """Map of service name → running :class:`Sandbox`."""
         return dict(self._sandboxes)
 
@@ -758,7 +319,7 @@ class ComposeProject:
         self,
         svc: _Service,
         hosts: dict[str, str],
-    ) -> SandboxBase:
+    ) -> Sandbox:
         """Create a Sandbox for a single compose service."""
         image = self._resolve_image(svc)
 
@@ -829,7 +390,7 @@ class ComposeProject:
         # cap_add: merge explicit cap_add with privileged (all caps)
         caps = list(svc.cap_add) if svc.cap_add else []
         if svc.privileged:
-            from agentdocker_lite.backends.base import CAP_NAME_TO_NUM
+            from agentdocker_lite.config import CAP_NAME_TO_NUM
             caps = list(CAP_NAME_TO_NUM.keys())
         if caps:
             config_kwargs["cap_add"] = caps
@@ -851,7 +412,7 @@ class ComposeProject:
         return sb
 
     @staticmethod
-    def _write_hosts(sb: SandboxBase, hosts: dict[str, str]) -> None:
+    def _write_hosts(sb: Sandbox, hosts: dict[str, str]) -> None:
         """Write /etc/hosts entries for service name resolution."""
         hosts_lines = "\n".join(f"{ip}\t{name}" for name, ip in hosts.items())
         try:
@@ -860,7 +421,7 @@ class ComposeProject:
             existing = ""
         sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
 
-    def _cmd_string(self, svc: _Service) -> Optional[str]:
+    def _cmd_string(self, svc: _Service) -> str | None:
         """Build the shell command to start a service.
 
         Combines entrypoint and command, matching Docker semantics:
@@ -905,7 +466,7 @@ class ComposeProject:
         return "; ".join(parts)
 
     @staticmethod
-    def _wrap_restart(cmd: str, policy: Optional[str]) -> str:
+    def _wrap_restart(cmd: str, policy: str | None) -> str:
         """Wrap a command with a restart loop based on compose restart policy.
 
         Mimics Docker restart behaviour:

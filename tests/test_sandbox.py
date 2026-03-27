@@ -849,7 +849,8 @@ class TestEdgeCases:
         sb = Sandbox(config, name="dead-sandbox")
         sb.delete()
         # rootfs is gone, so run() should raise (shell can't restart)
-        with pytest.raises((RuntimeError, OSError)):
+        from agentdocker_lite._errors import SandboxError
+        with pytest.raises((RuntimeError, OSError, SandboxError)):
             sb.run("echo hello")
 
     def test_concurrent_commands_on_same_sandbox(self, sandbox):
@@ -883,7 +884,7 @@ class TestMountOverlay:
     def test_single_layer(self, tmp_path):
         """mount_overlay works with a single lowerdir."""
         _requires_root()
-        from agentdocker_lite._mount import mount_overlay
+        from agentdocker_lite._core import py_mount_overlay as mount_overlay
 
         lower = tmp_path / "lower"
         lower.mkdir()
@@ -902,7 +903,7 @@ class TestMountOverlay:
     def test_multi_layer(self, tmp_path):
         """mount_overlay works with multiple lowerdirs (bypasses 256-byte limit)."""
         _requires_root()
-        from agentdocker_lite._mount import mount_overlay
+        from agentdocker_lite._core import py_mount_overlay as mount_overlay
 
         # Create 6 layers — this exceeds the 256-byte fsconfig limit
         layers = []
@@ -933,7 +934,7 @@ class TestMountOverlay:
     def test_new_api_detection(self):
         """_check_new_mount_api returns a boolean (True on kernel >= 6.8)."""
         _requires_root()
-        from agentdocker_lite._mount import _check_new_mount_api
+        from agentdocker_lite._core import py_check_new_mount_api as _check_new_mount_api
 
         result = _check_new_mount_api()
         assert isinstance(result, bool)
@@ -1016,6 +1017,143 @@ class TestPortMap:
             assert "200" in output
         finally:
             sb.delete()
+
+    def test_delete_cleans_netns_rootful(self, tmp_path, shared_cache_dir):
+        """delete() with port_map leaves no stale netns bind mounts (rootful)."""
+        _requires_root()
+        _requires_tun()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            net_isolate=True,
+            port_map=["19878:8000"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="netns-cleanup")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        # env_dir should be gone
+        assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
+        # No /run/netns bind mount left
+        import subprocess
+        mounts = subprocess.run(["mount"], capture_output=True, text=True).stdout
+        assert "netns-cleanup" not in mounts, f"stale netns mount: {[l for l in mounts.splitlines() if 'netns-cleanup' in l]}"
+
+    def test_delete_cleans_netns_userns(self, tmp_path, shared_cache_dir):
+        """delete() with port_map leaves no stale .netns bind mounts (userns)."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            net_isolate=True,
+            port_map=["19878:8000"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="netns-cleanup-u")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        # env_dir should be gone (no stuck .netns bind mount)
+        assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
+
+
+# ------------------------------------------------------------------ #
+#  Cleanup verification                                                 #
+# ------------------------------------------------------------------ #
+
+
+class TestCleanupVerification:
+    """Verify that delete() and reset() leave no resource leaks."""
+
+    def test_delete_removes_all_files(self, tmp_path, shared_cache_dir):
+        """delete() removes the entire env_dir, no leftovers."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="clean-test")
+        # Create some files inside sandbox
+        sb.run("echo test > /workspace/file.txt")
+        sb.run("mkdir -p /workspace/subdir && echo nested > /workspace/subdir/a.txt")
+        env_dir = sb._env_dir
+        sb.delete()
+
+        assert not env_dir.exists(), \
+            f"env_dir still exists after delete: {list(env_dir.rglob('*')) if env_dir.exists() else []}"
+
+    def test_delete_kills_shell_process(self, tmp_path, shared_cache_dir):
+        """delete() kills the persistent shell process — no zombies."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="proc-clean")
+        shell_pid = sb._persistent_shell.pid
+        assert shell_pid is not None
+
+        sb.delete()
+
+        # Process should be dead
+        import signal
+        with pytest.raises(ProcessLookupError):
+            os.kill(shell_pid, signal.SIG_DFL)
+
+    def test_reset_no_mount_leak(self, tmp_path, shared_cache_dir):
+        """Multiple resets don't accumulate bind mounts."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="mount-leak")
+        try:
+            import subprocess
+            before = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
+            for _ in range(5):
+                sb.reset()
+            after = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
+            # Mount count should not grow with resets
+            assert after <= before + 2, \
+                f"Mount leak: {before} mounts before, {after} after 5 resets"
+        finally:
+            sb.delete()
+
+    def test_delete_no_stale_cgroup(self, tmp_path, shared_cache_dir):
+        """delete() removes the cgroup directory."""
+        _requires_root()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            memory_max="256m",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="cg-clean")
+        cgroup_path = sb._cgroup_path
+        sb.delete()
+
+        if cgroup_path:
+            assert not cgroup_path.exists(), f"cgroup not cleaned: {cgroup_path}"
 
 
 # ------------------------------------------------------------------ #
@@ -1260,23 +1398,23 @@ class TestParseCpuMax:
     """Unit tests for _parse_cpu_max sugar."""
 
     def test_fraction(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from agentdocker_lite.config import _parse_cpu_max
         assert _parse_cpu_max("0.5") == "50000 100000"
 
     def test_integer_cores(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from agentdocker_lite.config import _parse_cpu_max
         assert _parse_cpu_max("2") == "200000 100000"
 
     def test_percentage(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from agentdocker_lite.config import _parse_cpu_max
         assert _parse_cpu_max("50%") == "50000 100000"
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from agentdocker_lite.config import _parse_cpu_max
         assert _parse_cpu_max("50000 100000") == "50000 100000"
 
     def test_small_fraction(self):
-        from agentdocker_lite.backends.base import _parse_cpu_max
+        from agentdocker_lite.config import _parse_cpu_max
         result = _parse_cpu_max("0.01")
         quota, period = result.split()
         assert int(quota) >= 1
@@ -1292,24 +1430,24 @@ class TestParseIoMax:
     """Unit tests for _parse_io_max sugar."""
 
     def test_bare_size(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from agentdocker_lite.config import _parse_io_max
         # /dev/xxx won't resolve on CI, but MAJ:MIN passthrough works
         result = _parse_io_max("259:0 10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_keyed_size(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from agentdocker_lite.config import _parse_io_max
         result = _parse_io_max("259:0 wbps=10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_multiple_params(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from agentdocker_lite.config import _parse_io_max
         result = _parse_io_max("259:0 rbps=5mb wbps=10mb")
         assert "rbps=5242880" in result
         assert "wbps=10485760" in result
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.backends.base import _parse_io_max
+        from agentdocker_lite.config import _parse_io_max
         raw = "259:0 wbps=10485760"
         assert _parse_io_max(raw) == raw
 
@@ -1323,16 +1461,16 @@ class TestCpuShares:
     """Unit tests for _convert_cpu_shares."""
 
     def test_default_1024(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from agentdocker_lite.config import _convert_cpu_shares
         # Docker 1024 → cgroup v2 weight ~39 (formula: 1 + (1022*9999)/262142)
         assert 1 <= _convert_cpu_shares(1024) <= 10000
 
     def test_minimum(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from agentdocker_lite.config import _convert_cpu_shares
         assert _convert_cpu_shares(2) >= 1
 
     def test_maximum(self):
-        from agentdocker_lite.backends.base import _convert_cpu_shares
+        from agentdocker_lite.config import _convert_cpu_shares
         assert _convert_cpu_shares(262144) == 10000
 
     def test_from_docker(self):

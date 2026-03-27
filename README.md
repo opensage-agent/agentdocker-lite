@@ -126,16 +126,16 @@ config = SandboxConfig(
     image="ubuntu:22.04",
     working_dir="/workspace",
 )
-sb = Sandbox(config, name="worker-0")
 
-output, ec = sb.run("echo hello world")
-print(output)  # "hello world\n"
+with Sandbox(config, name="worker-0") as sb:
+    output, ec = sb.run("echo hello world")
+    print(output)  # "hello world\n"
 
-sb.write_file("/workspace/payload.py", "print('hello')")
-content = sb.read_file("/workspace/payload.py")
+    sb.write_file("/workspace/payload.py", "print('hello')")
+    content = sb.read_file("/workspace/payload.py")
 
-sb.reset()   # instant filesystem reset
-sb.delete()  # full cleanup
+    sb.reset()   # instant filesystem reset
+# auto cleanup on exit
 ```
 
 No `sudo` required. The sandbox automatically uses user namespaces for full isolation. OCI image config (`WORKDIR`, `ENV`, `ENTRYPOINT`) is auto-applied — user values take precedence.

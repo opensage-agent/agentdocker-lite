@@ -13,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxBase, SandboxConfig
-from agentdocker_lite.security import _landlock_abi_version
+from agentdocker_lite import Sandbox, SandboxConfig
+from agentdocker_lite._errors import SandboxInitError, SandboxKernelError
+from agentdocker_lite._core import py_landlock_abi_version as _landlock_abi_version
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -221,7 +222,7 @@ class TestEntrypoint:
             rootfs_cache_dir=shared_cache_dir,
             entrypoint=["/nonexistent_entrypoint.sh"],
         )
-        with pytest.raises(RuntimeError):
+        with pytest.raises((RuntimeError, SandboxInitError)):
             Sandbox(config, name="ep-bad")
 
     def test_entrypoint_rootless(self, tmp_path, shared_cache_dir):
@@ -284,7 +285,7 @@ class TestCleanup:
     def test_cleanup_stale_no_crash(self, tmp_path):
         """cleanup_stale() should not crash even with nothing to clean."""
         _requires_root()
-        SandboxBase.cleanup_stale(str(tmp_path / "envs"))
+        Sandbox.cleanup_stale(str(tmp_path / "envs"))
 
     def test_cleanup_stale_removes_leftover(self, tmp_path, shared_cache_dir):
         """cleanup_stale() removes leftover sandbox directories."""
@@ -306,7 +307,7 @@ class TestCleanup:
         (env_dir / ".pid").write_text("999999999")
         (env_dir / "rootfs").mkdir(exist_ok=True)
         # cleanup_stale should remove the stale directory
-        cleaned = SandboxBase.cleanup_stale(str(tmp_path / "envs"))
+        cleaned = Sandbox.cleanup_stale(str(tmp_path / "envs"))
         assert cleaned >= 1
         assert not env_dir.exists()
 
@@ -765,7 +766,7 @@ class TestFailedCreationCleanup:
         self._skip_if_root()
         env_dir = tmp_path / "envs"
         # Use an invalid shell to force startup failure
-        from agentdocker_lite.backends.rootless import RootlessSandbox
+        from agentdocker_lite.sandbox import Sandbox as RootlessSandbox
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(env_dir),
@@ -865,7 +866,7 @@ class TestMappedUidCleanup:
     def _skip_if_no_full_mapping(self):
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        from agentdocker_lite.backends.rootless import RootlessSandbox
+        from agentdocker_lite.sandbox import Sandbox as RootlessSandbox
         if RootlessSandbox._detect_subuid_range() is None:
             pytest.skip("full uid mapping not configured (no subuid entry)")
 
@@ -1022,7 +1023,7 @@ class TestHardening:
         )
         sb = Sandbox(config, name="oom-test")
         try:
-            pid = sb._persistent_shell._process.pid
+            pid = sb._persistent_shell.pid
             score = open(f"/proc/{pid}/oom_score_adj").read().strip()
             assert score == "500"
         finally:
@@ -1245,22 +1246,22 @@ class TestLandlockRootful:
             sb.delete()
 
     def test_landlock_unavailable_raises(self):
-        """Setting Landlock params on unsupported kernel should raise RuntimeError."""
+        """Setting Landlock params on unsupported kernel should raise SandboxKernelError."""
         from unittest.mock import patch
-        from agentdocker_lite.backends.base import SandboxBase
+        from agentdocker_lite.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, writable_paths=["/workspace"])
-        with patch("agentdocker_lite.security._landlock_abi_version", return_value=0):
-            with pytest.raises(RuntimeError, match="Landlock not available"):
-                SandboxBase._build_landlock_config(config)
+        with patch("agentdocker_lite._core.py_landlock_abi_version", return_value=0):
+            with pytest.raises(SandboxKernelError, match="Landlock not available"):
+                Sandbox._build_landlock_config(config)
 
     def test_allowed_ports_low_abi_raises(self):
-        """allowed_ports on ABI < 4 should raise RuntimeError."""
+        """allowed_ports on ABI < 4 should raise SandboxKernelError."""
         from unittest.mock import patch
-        from agentdocker_lite.backends.base import SandboxBase
+        from agentdocker_lite.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, allowed_ports=[80])
-        with patch("agentdocker_lite.security._landlock_abi_version", return_value=3):
-            with pytest.raises(RuntimeError, match="ABI v4"):
-                SandboxBase._build_landlock_config(config)
+        with patch("agentdocker_lite._core.py_landlock_abi_version", return_value=3):
+            with pytest.raises(SandboxKernelError, match="ABI v4"):
+                Sandbox._build_landlock_config(config)
 
 
 # ------------------------------------------------------------------ #

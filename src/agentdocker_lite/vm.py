@@ -30,10 +30,10 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentdocker_lite.backends.base import SandboxBase
+    from agentdocker_lite.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +77,12 @@ class QemuVM:
 
     def __init__(
         self,
-        sandbox: SandboxBase,
+        sandbox: Sandbox,
         disk: str,
         memory: str = "2G",
         cpus: int = 2,
         display: str = "none",
-        extra_args: Optional[list[str]] = None,
+        extra_args: list[str] | None = None,
         qmp_socket: str = _QMP_SOCKET,
     ):
         self._sb = sandbox
@@ -92,7 +92,7 @@ class QemuVM:
         self._display = display
         self._extra_args = extra_args or []
         self._qmp_path = qmp_socket
-        self._handle: Optional[str] = None
+        self._handle: str | None = None
 
     # ------------------------------------------------------------------ #
     #  Lifecycle                                                           #
@@ -254,7 +254,7 @@ class QemuVM:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def check_available(sandbox: Optional[SandboxBase] = None) -> bool:
+    def check_available(sandbox: Sandbox | None = None) -> bool:
         """Check if QEMU/KVM is available.
 
         Args:
@@ -327,7 +327,7 @@ class QemuVM:
         self._sb.run(f"chmod +x {_QMP_HELPER}")
 
     def _qmp_exec(
-        self, command: str, arguments: Optional[dict] = None
+        self, command: str, arguments: dict | None = None
     ) -> dict:
         """Send a QMP command via the adl-qmp static binary.
 

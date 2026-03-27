@@ -13,7 +13,9 @@ import select
 import shlex
 import threading
 import time
-from typing import Optional, TypedDict
+from typing import TypedDict
+
+from agentdocker_lite._errors import SandboxInitError, SandboxTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -35,41 +37,41 @@ class SpawnConfig(TypedDict, total=False):
     rootful: bool
     userns: bool
     net_isolate: bool
-    net_ns: Optional[str]
-    shared_userns: Optional[str]
-    subuid_range: Optional[tuple[int, int, int]]
+    net_ns: str | None
+    shared_userns: str | None
+    subuid_range: tuple[int, int, int] | None
 
     # Filesystem
-    lowerdir_spec: Optional[str]
-    upper_dir: Optional[str]
-    work_dir: Optional[str]
+    lowerdir_spec: str | None
+    upper_dir: str | None
+    work_dir: str | None
     read_only: bool
     volumes: list[str]
     devices: list[str]
-    shm_size: Optional[int]
+    shm_size: int | None
     tmpfs_mounts: list[str]
 
     # Security
     seccomp: bool
     cap_add: list[int]
-    hostname: Optional[str]
+    hostname: str | None
     landlock_read_paths: list[str]
     landlock_write_paths: list[str]
     landlock_ports: list[int]
     landlock_strict: bool
 
     # Process
-    cgroup_path: Optional[str]
+    cgroup_path: str | None
     entrypoint: list[str]
     tty: bool
 
     # Network
     port_map: list[str]
-    pasta_bin: Optional[str]
+    pasta_bin: str | None
     ipv6: bool
 
     # Internal
-    env_dir: Optional[str]
+    env_dir: str | None
 
 
     # SpawnResult is a Rust pyclass (agentdocker_lite._core.PySpawnResult)
@@ -90,19 +92,20 @@ class _PersistentShell:
         self,
         config: SpawnConfig,
         *,
-        ulimits: Optional[dict[str, tuple[int, int]]] = None,
+        ulimits: dict[str, tuple[int, int]] | None = None,
     ):
         self._config = config
         self._ulimits = ulimits or {}
 
         # Process state (set by start())
-        self.pid: Optional[int] = None
-        self._pidfd: Optional[int] = None
-        self._stdin_fd: Optional[int] = None
-        self._stdout_fd: Optional[int] = None
-        self._signal_r: Optional[int] = None
-        self._signal_fd: Optional[int] = None  # signal_w fd num inside child
-        self._master_fd: Optional[int] = None
+        self.pid: int | None = None
+        self._pidfd: int | None = None
+        self._stdin_fd: int | None = None
+        self._stdout_fd: int | None = None
+        self._signal_r: int | None = None
+        self._signal_fd: int | None = None  # signal_w fd num inside child
+        self._master_fd: int | None = None
+        self._err_r_fd: int | None = None
         self._lock = threading.Lock()
 
         self.start()
@@ -125,6 +128,7 @@ class _PersistentShell:
         self._signal_fd = result.signal_w_fd_num
         self._master_fd = result.master_fd
         self._pidfd = result.pidfd
+        self._err_r_fd = result.err_r_fd
 
         if self._config.get("tty") and self._master_fd is not None:
             # In TTY mode, stdin and stdout go through master_fd
@@ -171,6 +175,11 @@ class _PersistentShell:
                     detail += " child already reaped."
                     self.pid = None
 
+            # Read any warnings/errors from the init error pipe
+            init_msgs = self._drain_err_pipe()
+            if init_msgs:
+                detail += f" init messages: {'; '.join(init_msgs)}"
+
             # Try to read any output the child produced (errors, etc.)
             if self._stdout_fd is not None:
                 try:
@@ -188,10 +197,14 @@ class _PersistentShell:
 
             rootfs = self._config.get("rootfs", "?")
             shell = self._config.get("shell", "?")
-            raise RuntimeError(
+            raise SandboxInitError(
                 f"Persistent shell failed to start "
                 f"(rootfs={rootfs}, shell={shell}).{detail}"
             )
+
+        # Shell started successfully — collect non-fatal init warnings.
+        for warn_msg in self._drain_err_pipe():
+            logger.warning("sandbox init: %s", warn_msg)
 
         rootful = self._config.get("rootful", False)
         ns_flags = "user,pid,mount" if not rootful else "pid,mount"
@@ -202,6 +215,55 @@ class _PersistentShell:
             self.pid, self._config.get("rootfs"), ns_flags,
             self._config.get("tty"),
         )
+
+    def _drain_err_pipe(self) -> list[str]:
+        """Non-blocking read of all data from the init error/warning pipe.
+
+        Returns a list of decoded warning messages (``W:`` prefix stripped).
+        Fatal messages (``F:`` prefix) are included as-is.
+        Closes the pipe fd when done.
+        """
+        fd = self._err_r_fd
+        if fd is None:
+            return []
+        msgs: list[str] = []
+        try:
+            import fcntl
+            # Ensure non-blocking
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+            chunks = []
+            while True:
+                try:
+                    data = os.read(fd, 8192)
+                    if not data:
+                        break
+                    chunks.append(data)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    break
+            if chunks:
+                raw = b"".join(chunks).decode("utf-8", errors="replace")
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("W:"):
+                        msgs.append(line[2:])
+                    elif line.startswith("F:"):
+                        msgs.append(line[2:])
+                    else:
+                        msgs.append(line)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            self._err_r_fd = None
+        return msgs
 
     def kill(self) -> None:
         """Kill the shell and all processes in its PID namespace."""
@@ -220,7 +282,7 @@ class _PersistentShell:
                 pass
             self.pid = None
 
-        for fd_name in ("_master_fd", "_pidfd", "_signal_r", "_stdin_fd", "_stdout_fd"):
+        for fd_name in ("_master_fd", "_pidfd", "_signal_r", "_stdin_fd", "_stdout_fd", "_err_r_fd"):
             fd = getattr(self, fd_name, None)
             if fd is not None:
                 try:
@@ -241,7 +303,7 @@ class _PersistentShell:
 
     # -- command execution ------------------------------------------------- #
 
-    def execute(self, command: str, timeout: Optional[int] = None) -> tuple[str, int]:
+    def execute(self, command: str, timeout: int | None = None) -> tuple[str, int]:
         """Execute *command* and return ``(output, exit_code)``."""
         with self._lock:
             if not self.alive:
@@ -295,11 +357,11 @@ class _PersistentShell:
         return True
 
     @property
-    def _stdout_read_fd(self) -> Optional[int]:
+    def _stdout_read_fd(self) -> int | None:
         """File descriptor to read command output from."""
         return self._stdout_fd
 
-    def _read_signal(self, timeout: Optional[float] = None) -> Optional[str]:
+    def _read_signal(self, timeout: float | None = None) -> str | None:
         """Read a single line from the signal fd."""
         if self._signal_r is None:
             return None
@@ -319,8 +381,8 @@ class _PersistentShell:
             ep.close()
 
     def _read_until_signal(
-        self, timeout: Optional[float] = None
-    ) -> tuple[Optional[str], int]:
+        self, timeout: float | None = None
+    ) -> tuple[str | None, int]:
         """Read stdout until the signal fd fires with the exit code."""
         deadline = time.monotonic() + timeout if timeout else None
         stdout_fd = self._stdout_read_fd
@@ -328,7 +390,7 @@ class _PersistentShell:
         signal_fd = self._signal_r
         buf = b""
         parts: list[str] = []
-        exit_code: Optional[int] = None
+        exit_code: int | None = None
 
         ep = select.epoll()
         ep.register(stdout_fd, select.EPOLLIN)

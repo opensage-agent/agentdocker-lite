@@ -1,5 +1,21 @@
 # Development
 
+## Rust core
+
+Security primitives (seccomp, capabilities, Landlock), namespace spawning, overlayfs mounting, and cgroup management are implemented in Rust via PyO3. The `_core` extension module is built by maturin.
+
+```bash
+pip install maturin
+maturin develop --release        # build Rust core + install in-place
+pytest tests/                    # run tests
+```
+
+To regenerate type stubs after changing Rust bindings:
+
+```bash
+cargo run --bin stub_gen --release
+```
+
 ## Vendored binaries
 
 The pip package bundles static binaries in `src/agentdocker_lite/_vendor/`:
@@ -8,26 +24,6 @@ The pip package bundles static binaries in `src/agentdocker_lite/_vendor/`:
 |---|---|---|---|
 | `pasta` / `pasta.avx2` | NAT'd networking + port mapping | ~1.3MB | [passt](https://passt.top/) |
 | `criu` | Process checkpoint/restore | ~2.8MB | [seqeralabs/criu-static](https://github.com/seqeralabs/criu-static/releases) v4.2 |
-| `adl-seccomp` | Seccomp BPF + cap drop + mask/readonly paths | ~750KB | Built from `_vendor/adl-seccomp.c` |
-
-### Rebuilding adl-seccomp
-
-```bash
-gcc -static -Os -o src/agentdocker_lite/_vendor/adl-seccomp \
-    src/agentdocker_lite/_vendor/adl-seccomp.c && \
-    strip src/agentdocker_lite/_vendor/adl-seccomp
-```
-
-Requires `gcc` and static glibc. Must be statically linked — it runs inside minimal rootfs containers.
-
-What `adl-seccomp` does (in order):
-1. Drops non-essential capabilities (keeps Docker-default 13)
-2. Masks sensitive paths (`/proc/kcore`, `/proc/keys`, etc.)
-3. Remounts kernel paths (`/proc/sys`, `/proc/bus`, etc.) read-only
-4. Reads BPF bytecode from `/tmp/.adl_seccomp.bpf` and applies seccomp
-5. `exec`s its arguments — seccomp filter inherited across exec
-
-**Note:** Currently only used in rootful mode. Userns mode still uses the Python-based seccomp helper.
 
 ### Regenerating protobuf
 
@@ -43,15 +39,47 @@ sudo python -m pytest tests/test_checkpoint.py -v   # CRIU tests
 python -m pytest tests/test_security.py -v -k "UserNamespace"  # rootless
 ```
 
-## Architecture (rootful mode)
+## Architecture
 
 ```
-Host Python process
-  └─ unshare --pid --mount --uts --ipc [--time] --fork bash -c '
-       mount /proc, /dev on rootfs (host tools)
-       pivot_root into rootfs
-       exec setsid adl-seccomp /bin/sh
-     '
-       └─ adl-seccomp: cap drop → mask → readonly → seccomp → exec /bin/sh
-            └─ /bin/sh (persistent shell, reads commands via stdin pipe)
+Sandbox(config, name)
+  __init__:
+    if root → _init_rootful()      # direct mount/cgroup
+    else   → _init_userns()        # user namespace (kernel 5.11+)
+
+  _init_rootful / _init_userns:
+    resolve rootfs (OCI layer cache)
+    mount overlayfs / btrfs
+    setup cgroup v2 (rootful) or systemd delegation (rootless)
+    py_spawn_sandbox() → Rust init chain:
+      fork → unshare(PID|MNT|UTS|IPC|USER|NET)
+      mount overlayfs + volumes + /proc + /dev
+      pivot_root → security (cap drop + mask + seccomp + Landlock)
+      exec shell
+    ← PersistentShell (stdin/stdout pipes + signal fd)
+
+  run(cmd) → write to shell stdin, read stdout, signal fd returns exit code
+  reset()  → kill shell, O(1) rename upper/work dirs, restart shell
+  delete() → kill shell, unmount, cleanup cgroup, rm dirs
+```
+
+## Project structure
+
+```
+src/agentdocker_lite/
+├── config.py           SandboxConfig + parsers + Docker compat
+├── sandbox.py          Sandbox class (single unified implementation)
+├── _errors.py          Structured error types (SandboxError hierarchy)
+├── _shell.py           PersistentShell + SpawnConfig TypedDict
+├── _core.pyi           Rust bindings type stubs (auto-generated)
+├── rootfs.py           OCI image management + layer cache
+├── _registry.py        Pure-Python OCI registry client
+├── checkpoint.py       CRIU checkpoint/restore
+├── vm.py               QEMU/KVM VM manager
+├── cli.py              CLI commands (adl ps/kill/cleanup)
+├── compose/            Docker Compose compatibility
+│   ├── _parse.py       YAML parsing + service definitions
+│   ├── _network.py     SharedNetwork + health checks
+│   └── _project.py     ComposeProject orchestrator
+└── _vendor/            Vendored binaries (pasta, criu)
 ```

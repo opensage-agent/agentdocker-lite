@@ -17,9 +17,22 @@ All notable changes to this project will be documented in this file.
 - **pyyaml is now a default dependency** (was optional `[compose]` extra). Simplifies install for compose users.
 - README restructured: "Drop-in Docker replacement" section with SWE-bench real-world comparison, updated migration cheatsheet with auto-convert entries.
 
+### Fixed
+- **`_host_path()` userns multi-layer bug**: `read_file()`/`copy_from()` in userns mode now searches all image layers (top to bottom), not just the first layer.
+
 ### Internal
-- 192 tests total (152 → 192), 41 new tests for parsers, from_docker, from_docker_run, image defaults.
-- ruff lint clean.
+- **Rust core**: Security primitives (seccomp, capabilities, Landlock), namespace spawning, overlayfs mounting moved to Rust via PyO3. `PySpawnResult` pyclass + `SpawnConfig` TypedDict for typed FFI boundary.
+- **Architecture refactor**: Merged `SandboxBase` + `RootfulSandbox` + `RootlessSandbox` into single `Sandbox` class. Old `backends/` package removed.
+- **File reorganization**: `SandboxConfig` extracted to `config.py`. `compose.py` split into `compose/` subpackage (`_parse.py`, `_network.py`, `_project.py`). Thin wrapper files (`security.py`, `_pidfd.py`, `_mount.py`) removed — callers use `_core` directly.
+- **Context manager**: `Sandbox` supports `with Sandbox(...) as sb:` for automatic cleanup.
+- **Structured error types**: `SandboxError` hierarchy (`SandboxInitError`, `SandboxConfigError`, `SandboxKernelError`, `SandboxTimeoutError`) replaces generic `RuntimeError`/`ValueError`.
+- **Init deduplication**: Extracted `_init_common_state`, `_build_spawn_config`, `_finalize_init` helpers — `_init_rootful`/`_init_userns` share ~60% common logic instead of duplicating it.
+- **cgroup via Rust**: `_setup_cgroup`/`_cleanup_cgroup` now delegate to `py_create_cgroup`/`py_apply_cgroup_limits`/`py_cleanup_cgroup` from Rust `_core` instead of manual Python file writes.
+- **Landlock config merged**: `_build_landlock_config` and `_landlock_lists` merged into single method, dead adl-seccomp string config removed.
+- **Rootfs resolution unified**: `_resolve_btrfs_rootfs`/`_resolve_flat_rootfs` share `_resolve_cached_rootfs` helper for lock-check-prepare pattern.
+- **Type annotations**: `Optional[X]` → `X | None` throughout (Python 3.12+ style).
+- **Type safety**: `SandboxFeatures` TypedDict, auto-generated `.pyi` stubs via pyo3-stub-gen, 0 pyright errors.
+- 239 tests, 0 Rust warnings, 0 pyright errors.
 
 ## [0.0.4] - 2026-03-21
 

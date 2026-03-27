@@ -65,6 +65,12 @@ class PySpawnResult:
         r"""
         pidfd for the shell process (None if kernel doesn't support it).
         """
+    @property
+    def err_r_fd(self) -> builtins.int:
+        r"""
+        Read end of the error/warning pipe from child init.
+        After startup, Python reads this for non-fatal warnings.
+        """
 
 def py_apply_cgroup_limits(cgroup_path: builtins.str, limits: typing.Mapping[builtins.str, builtins.str]) -> None:
     r"""

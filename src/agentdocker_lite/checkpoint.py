@@ -37,7 +37,7 @@ import socket
 import struct
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 # Lazy-import protobuf to avoid hard dependency at module level.
 # The generated rpc_pb2 lives in _vendor/.
@@ -48,7 +48,7 @@ from typing import Any
 rpc: Any = __import__("agentdocker_lite._vendor.criu_rpc_pb2", fromlist=["criu_rpc_pb2"])
 
 if TYPE_CHECKING:
-    from agentdocker_lite.backends.base import SandboxBase
+    from agentdocker_lite.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +224,8 @@ class CheckpointManager:
 
     def __init__(
         self,
-        sandbox: SandboxBase,
-        criu_binary: Optional[str] = None,
+        sandbox: Sandbox,
+        criu_binary: str | None = None,
     ):
         self._sandbox = sandbox
         self._criu_path = criu_binary or _find_criu()
@@ -293,8 +293,8 @@ class CheckpointManager:
             "signal_fd": signal_fd,
             "pipe_fds": pipe_fds,  # ["pipe:[X]", "pipe:[Y]", "pipe:[Y]"]
             "all_pipe_inodes": {str(k): v for k, v in all_pipe_inodes.items()},
-            "tty": shell._config.get("tty", False),
-            "working_dir": shell._config.get("working_dir", "/"),
+            "tty": self._sandbox._config.tty,
+            "working_dir": self._sandbox._config.working_dir,
         }
         # Save pipe_fds as descriptors.json (runc convention).
         (criu_dir / "descriptors.json").write_text(json.dumps(pipe_fds))
@@ -410,9 +410,9 @@ class CheckpointManager:
                 base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
                 lowerdir_spec = str(base_rootfs) if base_rootfs else None
             if lowerdir_spec:
-                from agentdocker_lite._mount import mount_overlay
+                from agentdocker_lite._core import py_mount_overlay
 
-                mount_overlay(
+                py_mount_overlay(
                     lowerdir_spec=str(lowerdir_spec),
                     upper_dir=str(upper),
                     work_dir=str(work),
@@ -616,12 +616,12 @@ class _RestoredProcess:
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
         self.pid = pid
         self._dead = False
-        from agentdocker_lite._pidfd import pidfd_open
-        self._pidfd: Optional[int] = pidfd_open(pid)
+        from agentdocker_lite._core import py_pidfd_open
+        self._pidfd: int | None = py_pidfd_open(pid)
         self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
         self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
 
-    def poll(self) -> Optional[int]:
+    def poll(self) -> int | None:
         if self._dead:
             return -1
         # With subreaper, the restored process is our adopted child,
@@ -635,8 +635,8 @@ class _RestoredProcess:
         except ChildProcessError:
             # Not our child (subreaper not set or race) — fallback to pidfd.
             if self._pidfd is not None:
-                from agentdocker_lite._pidfd import pidfd_is_alive
-                if not pidfd_is_alive(self._pidfd):
+                from agentdocker_lite._core import py_pidfd_is_alive
+                if not py_pidfd_is_alive(self._pidfd):
                     self._dead = True
                     return -1
                 return None
@@ -675,7 +675,7 @@ class _RestoredProcess:
                 pass
             self._pidfd = None
 
-    def wait(self, timeout: Optional[float] = None) -> int:
+    def wait(self, timeout: float | None = None) -> int:
         import time
         deadline = time.monotonic() + timeout if timeout is not None else None
         while True:

@@ -37,9 +37,9 @@ def main() -> int:
     )
 
     if args.command == "cleanup":
-        from agentdocker_lite.backends.base import SandboxBase
+        from agentdocker_lite.sandbox import Sandbox
 
-        cleaned = SandboxBase.cleanup_stale(env_base_dir=args.env_base_dir)
+        cleaned = Sandbox.cleanup_stale(env_base_dir=args.env_base_dir)
         print(f"Cleaned {cleaned} stale sandbox(es).")
         return 0
 

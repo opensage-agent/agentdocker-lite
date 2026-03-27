@@ -37,6 +37,9 @@ pub struct PySpawnResult {
     pub master_fd: Option<i32>,
     /// pidfd for the shell process (None if kernel doesn't support it).
     pub pidfd: Option<i32>,
+    /// Read end of the error/warning pipe from child init.
+    /// After startup, Python reads this for non-fatal warnings.
+    pub err_r_fd: i32,
 }
 
 // ======================================================================
@@ -317,6 +320,7 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
         signal_w_fd_num: r.signal_w_fd_num,
         master_fd: r.master_fd.map(|fd| fd as i32),
         pidfd: r.pidfd.map(|fd| fd as i32),
+        err_r_fd: r.err_r_fd,
     })
 }
 

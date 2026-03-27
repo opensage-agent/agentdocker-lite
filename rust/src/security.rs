@@ -377,7 +377,10 @@ pub fn apply_landlock(
             add_path_rule(ruleset_fd, path, FS_READ & handled_fs)?;
         }
         for path in write_paths {
-            add_path_rule(ruleset_fd, path, fs_write & handled_fs)?;
+            // Writable paths implicitly also need read access (so the shell
+            // can cat/ls files it just wrote).  Include FS_READ in the mask
+            // so that write_paths get both read and write permission.
+            add_path_rule(ruleset_fd, path, (fs_write | FS_READ) & handled_fs)?;
         }
         for &port in allowed_tcp_ports {
             if abi < 4 { break; }

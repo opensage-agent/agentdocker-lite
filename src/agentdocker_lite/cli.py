@@ -80,8 +80,8 @@ def cmd_ps(args: argparse.Namespace) -> None:
 
 
 def cmd_cleanup(args: argparse.Namespace) -> None:
-    from agentdocker_lite.backends.base import SandboxBase
-    cleaned = SandboxBase.cleanup_stale(str(_env_base_dir(args)))
+    from agentdocker_lite.sandbox import Sandbox
+    cleaned = Sandbox.cleanup_stale(str(_env_base_dir(args)))
     if cleaned:
         print(f"Cleaned up {cleaned} stale sandbox(es).")
     else:
@@ -134,8 +134,8 @@ def cmd_kill(args: argparse.Namespace) -> None:
             pass
     time.sleep(0.1)
 
-    from agentdocker_lite.backends.base import SandboxBase
-    SandboxBase.cleanup_stale(str(base))
+    from agentdocker_lite.sandbox import Sandbox
+    Sandbox.cleanup_stale(str(base))
 
 
 def main() -> None:

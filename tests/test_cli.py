@@ -188,5 +188,4 @@ class TestCli:
         except Exception:
             pass  # shell already dead, delete may partially fail
         # cleanup_stale handles the rest
-        from agentdocker_lite.backends.base import SandboxBase
-        SandboxBase.cleanup_stale(env_dir)
+        Sandbox.cleanup_stale(env_dir)

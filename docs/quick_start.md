@@ -426,8 +426,8 @@ adl cleanup             # or from Python:
 ```
 
 ```python
-from agentdocker_lite import SandboxBase
-SandboxBase.cleanup_stale()
+from agentdocker_lite import Sandbox
+Sandbox.cleanup_stale()
 ```
 
 ## Feature detection
