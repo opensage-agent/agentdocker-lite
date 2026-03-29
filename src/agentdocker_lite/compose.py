@@ -860,24 +860,22 @@ class ComposeProject:
         """Write /etc/hosts entries for service name resolution.
 
         Docker creates /etc/hosts, /etc/hostname, /etc/resolv.conf via
-        bind mounts, bypassing the image filesystem entirely.  We emulate
-        that by force-creating /etc/hosts (removing any overlayfs whiteout
-        artifact first).
+        bind mounts, bypassing the image filesystem.  We write from
+        inside the sandbox (via ``run()``) to ensure the overlay mount
+        sees the change immediately.
         """
-        hosts_lines = "\n".join(f"{ip}\t{name}" for name, ip in hosts.items())
+        lines = ["127.0.0.1\tlocalhost", "::1\tlocalhost"]
+        lines.extend(f"{ip}\t{name}" for name, ip in hosts.items())
+        content = "\\n".join(lines) + "\\n"
+        # Write from inside the sandbox so overlayfs upper is updated
+        # within the mount namespace.  Remove any stale whiteout first.
         try:
-            existing = sb.read_file("/etc/hosts")
+            sb.run(
+                f"rm -rf /etc/hosts 2>/dev/null; printf '{content}' > /etc/hosts",
+                timeout=5,
+            )
         except Exception:
-            existing = ""
-            # /etc/hosts might be a whiteout directory artifact — remove it
-            try:
-                sb.run("rm -rf /etc/hosts", timeout=5)
-            except Exception:
-                pass
-        # Ensure localhost is always resolvable (Docker does this automatically)
-        if "localhost" not in existing:
-            existing = "127.0.0.1\tlocalhost\n::1\tlocalhost\n" + existing
-        sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
+            pass
 
     def _cmd_string(self, svc: _Service) -> Optional[str]:
         """Build the shell command to start a service.
