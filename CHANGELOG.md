@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Health check daemon**: `_wait_healthy` now mirrors Docker Engine architecture — a background `_HealthMonitor` thread runs the check command at `interval` / `start_interval`, and `_wait_healthy` polls status every 500ms (matching Docker Compose). Previously, `start_period` caused a synchronous sleep and checks used the compose `interval` directly.
+- **Health check defaults**: `interval` default changed from 10s to 30s, `timeout` from 5s to 30s, matching Docker Engine defaults. Added `start_interval` support (default 5s, Docker Engine 25+).
+- **build-only service image inference**: `_query_compose_config()` infers `{project}-{service}` image name for services with `build:` but no `image:`.
+- **`/etc/hosts` written from inside sandbox**: Uses `sb.run()` instead of host-side `write_file()` to ensure overlay mount namespace sees the change.
+- **Alpine shell compatibility**: `run()` and `run_background()` use detected shell instead of hardcoded `bash`.
+
+### Fixed
+- **Health check timeout**: Uses `default_timeout` as overall deadline instead of compose `retries` count.
+
 ## [0.0.5] - 2026-03-24
 
 ### Added

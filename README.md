@@ -72,7 +72,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts (e.g. database init). ComposeProject combines entrypoint+CMD as background process matching Docker semantics
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
-- **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces
+- **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces, Docker-matching health check daemon (`interval`, `start_period`, `start_interval`, `retries`)
 - **CLI**: `adl ps/kill/cleanup` for sandbox management
 
 ## Requirements
