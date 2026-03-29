@@ -554,18 +554,18 @@ class ComposeProject:
         if not cmd:
             return
 
-        interval = _parse_duration(hc.get("interval", "10s"))
         hc_timeout = _parse_duration(hc.get("timeout", "5s"))
-        # start_period intentionally ignored — Docker polls immediately and
-        # only uses it as a grace window for failure accounting.  We just
-        # poll from the start and return as soon as the check passes.
+        # Docker Compose polls container status every 500ms (fixed),
+        # delegating actual health checks to the daemon.  Since ADL
+        # runs the check command directly, we use a slightly longer
+        # fixed interval to avoid overhead, but still much shorter
+        # than the compose ``interval`` (which can be 10-30s and is
+        # designed for steady-state monitoring, not startup).
+        poll_interval = 2.0
 
         sb = self._sandboxes[name]
 
-        # Poll immediately.  If the service becomes healthy during the
-        # start_period we return at once (no need to wait it out).
-        t0 = time.monotonic()
-        deadline = t0 + default_timeout
+        deadline = time.monotonic() + default_timeout
         attempt = 0
         while time.monotonic() < deadline:
             attempt += 1
@@ -576,8 +576,8 @@ class ComposeProject:
                     return
             except Exception:
                 pass
-            if time.monotonic() + interval < deadline:
-                time.sleep(interval)
+            if time.monotonic() + poll_interval < deadline:
+                time.sleep(poll_interval)
             else:
                 break
 
