@@ -556,12 +556,10 @@ class ComposeProject:
 
         hc_timeout = _parse_duration(hc.get("timeout", "5s"))
         # Docker Compose polls container status every 500ms (fixed),
-        # delegating actual health checks to the daemon.  Since ADL
-        # runs the check command directly, we use a slightly longer
-        # fixed interval to avoid overhead, but still much shorter
-        # than the compose ``interval`` (which can be 10-30s and is
-        # designed for steady-state monitoring, not startup).
-        poll_interval = 2.0
+        # ignoring the compose ``interval`` (which is for the daemon).
+        # We match that cadence — the persistent shell makes execution
+        # cheap, and failed checks (connection refused) return fast.
+        poll_interval = 0.5
 
         sb = self._sandboxes[name]
 
