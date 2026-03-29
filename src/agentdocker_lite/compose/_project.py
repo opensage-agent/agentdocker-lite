@@ -185,10 +185,21 @@ class ComposeProject:
         try:
             for name in self._startup_order:
                 svc = self._defs[name]
+
+                # Wait for deps that require service_healthy before
+                # starting this service (matches Docker Compose).
+                for dep_name, condition in svc.depends_on.items():
+                    if condition == "service_healthy":
+                        self._wait_healthy(dep_name, timeout)
+
                 sb = self._create_sandbox(svc, hosts_entries)
                 self._sandboxes[name] = sb
                 self._start_service(name, svc)
-                self._wait_healthy(name, svc, timeout)
+                self._start_health_monitor(name, svc)
+
+            # After all services started, wait for every health check
+            # in parallel (equivalent to ``docker compose up --wait``).
+            self._wait_all_healthy(timeout)
         except Exception:
             # Clean up on partial failure
             self.down()
@@ -610,43 +621,29 @@ class ComposeProject:
         handle = sb.run_background(cmd)
         self._bg_handles[name] = handle
 
-    def _wait_healthy(
-        self,
-        name: str,
-        svc: _Service,
-        default_timeout: int,
-    ) -> None:
-        """Wait for a service's health check to pass.
+    def _start_health_monitor(self, name: str, svc: _Service) -> None:
+        """Start a background health monitor for *name* (if configured).
 
-        Mirrors Docker's two-layer architecture:
-
-        * A :class:`_HealthMonitor` background thread acts as the
-          daemon, executing the check command at the compose-configured
-          ``interval`` / ``start_interval``.
-        * This method polls the monitor's ``status`` every 500 ms
-          (matching Docker Compose's ``convergence.go`` ticker).
+        The monitor runs independently; call :meth:`_wait_healthy` to
+        block until it reports *healthy*.
         """
         hc = svc.healthcheck
         if not hc:
             return
-
         test = hc.get("test")
         if not test:
             return
-
         cmd = _healthcheck_cmd(test)
         if not cmd:
             return
-
-        sb = self._sandboxes[name]
 
         # Stop any previous monitor (e.g. from a prior reset cycle)
         old = self._health_monitors.pop(name, None)
         if old is not None:
             old.stop()
 
-        monitor = _HealthMonitor(
-            sb,
+        self._health_monitors[name] = _HealthMonitor(
+            self._sandboxes[name],
             cmd,
             interval=_parse_duration(hc.get("interval", "30s")),
             timeout=_parse_duration(hc.get("timeout", "30s")),
@@ -654,10 +651,19 @@ class ComposeProject:
             start_interval=_parse_duration(hc.get("start_interval", "5s")),
             retries=int(hc.get("retries", 3)),
         )
-        self._health_monitors[name] = monitor
 
-        # Poll status at 500ms — same as Docker Compose
-        deadline = time.monotonic() + default_timeout
+    def _wait_healthy(self, name: str, timeout: int) -> None:
+        """Block until *name*'s health monitor reports healthy.
+
+        Polls the monitor status every 500 ms (matching Docker
+        Compose's ``convergence.go`` ticker).  No-op if no monitor
+        exists for *name*.
+        """
+        monitor = self._health_monitors.get(name)
+        if monitor is None:
+            return
+
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if monitor.status == "healthy":
                 logger.debug("Health check passed for %s", name)
@@ -670,7 +676,42 @@ class ComposeProject:
         self._health_monitors.pop(name, None)
         raise RuntimeError(
             f"Health check failed for service {name!r} "
-            f"({default_timeout}s timeout, last status: {monitor.status})"
+            f"({timeout}s timeout, last status: {monitor.status})"
+        )
+
+    def _wait_all_healthy(self, timeout: int) -> None:
+        """Wait for **all** health monitors to report healthy (parallel).
+
+        Equivalent to ``docker compose up --wait``.  Polls every 500 ms.
+        """
+        monitored = [n for n in self._startup_order if n in self._health_monitors]
+        if not monitored:
+            return
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            all_ok = True
+            for name in monitored:
+                mon = self._health_monitors.get(name)
+                if mon is None:
+                    continue
+                if mon.status == "unhealthy":
+                    raise RuntimeError(
+                        f"Health check failed for service {name!r}"
+                    )
+                if mon.status != "healthy":
+                    all_ok = False
+            if all_ok:
+                logger.debug("All health checks passed")
+                return
+            time.sleep(0.5)
+
+        not_ready = [
+            n for n in monitored
+            if (m := self._health_monitors.get(n)) and m.status != "healthy"
+        ]
+        raise RuntimeError(
+            f"Health check timeout ({timeout}s) for: {', '.join(not_ready)}"
         )
 
     # -- context manager ----------------------------------------------- #

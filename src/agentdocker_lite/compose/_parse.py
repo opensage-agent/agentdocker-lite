@@ -67,7 +67,8 @@ class _Service:
     volumes: list[str] = field(default_factory=list)
     ports: list[str] = field(default_factory=list)
     devices: list[str] = field(default_factory=list)
-    depends_on: list[str] = field(default_factory=list)
+    depends_on: dict[str, str] = field(default_factory=dict)
+    # service name → condition ("service_started" | "service_healthy" | ...)
     healthcheck: dict | None = None
     network_mode: str | None = None
     dns: list[str] | None = None
@@ -106,13 +107,19 @@ def _parse_environment(raw: Any) -> dict[str, str]:
     return {}
 
 
-def _parse_depends_on(raw: Any) -> list[str]:
-    """Parse depends_on from list or dict format."""
+def _parse_depends_on(raw: Any) -> dict[str, str]:
+    """Parse depends_on, preserving condition (default: service_started)."""
     if isinstance(raw, list):
-        return list(raw)
+        return {str(name): "service_started" for name in raw}
     if isinstance(raw, dict):
-        return list(raw.keys())
-    return []
+        result: dict[str, str] = {}
+        for name, config in raw.items():
+            if isinstance(config, dict):
+                result[str(name)] = config.get("condition", "service_started")
+            else:
+                result[str(name)] = "service_started"
+        return result
+    return {}
 
 
 def _parse_ulimits(raw: Any) -> dict[str, tuple[int, int]]:

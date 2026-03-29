@@ -114,7 +114,7 @@ class TestParseCompose:
                 image: redis:alpine
         """))
         services, _ = _parse_compose(compose, {})
-        assert services["app"].depends_on == ["db", "redis"]
+        assert services["app"].depends_on == {"db": "service_started", "redis": "service_started"}
 
     def test_depends_on_dict(self, tmp_path):
         compose = tmp_path / "docker-compose.yml"
@@ -393,7 +393,7 @@ class TestParseCompose:
         assert us.build is not None
         assert us.dns == ["8.8.8.8"]
         assert "seccomp:unconfined" in us.security_opt
-        assert us.depends_on == ["mailpit"]
+        assert us.depends_on == {"mailpit": "service_started"}
         assert us.healthcheck is not None
         assert "gmail_data:/app/data" in us.volumes
         assert us.environment["MAILPIT_BASE_URL"] == "http://127.0.0.1:9025"
@@ -508,9 +508,16 @@ class TestComplexCompose:
 
     def test_depends_on_condition(self, compose_file):
         services, _ = _parse_compose(compose_file, {})
-        assert "db" in services["api"].depends_on
-        assert "mail" in services["api"].depends_on
-        assert services["frontend"].depends_on == ["mail", "api"]
+        # api depends on db (service_healthy) and mail (service_started)
+        assert services["api"].depends_on == {
+            "db": "service_healthy",
+            "mail": "service_started",
+        }
+        # frontend uses list syntax → all default to service_started
+        assert services["frontend"].depends_on == {
+            "mail": "service_started",
+            "api": "service_started",
+        }
 
     def test_healthcheck_formats(self, compose_file):
         services, _ = _parse_compose(compose_file, {})
@@ -1393,5 +1400,5 @@ class TestHealthMonitor:
             rootfs_cache_dir=shared_cache_dir,
         )
         # Short timeout — should hit deadline before retries exhaust
-        with pytest.raises(RuntimeError, match="Health check failed"):
+        with pytest.raises(RuntimeError, match="Health check"):
             proj.up(timeout=5)
