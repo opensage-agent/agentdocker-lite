@@ -5,7 +5,10 @@ from __future__ import annotations
 import os
 import subprocess
 import textwrap
+import threading
+import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -16,6 +19,7 @@ from agentdocker_lite.compose import (
     _substitute,
     _topo_sort,
 )
+from agentdocker_lite.compose._project import _HealthMonitor
 
 
 # ------------------------------------------------------------------ #
@@ -1172,3 +1176,151 @@ class TestComposeProject:
             assert count == 1, f"expected exactly 1 run, got {count}"
         finally:
             proj.down()
+
+    def test_healthcheck_waits(self, tmp_path, shared_cache_dir):
+        """Service with healthcheck should block up() until healthy."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        # Service that takes ~2s to become "healthy" (touch a file after delay)
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sh -c 'sleep 1 && touch /tmp/ready && sleep infinity'"
+                healthcheck:
+                  test: ["CMD-SHELL", "test -f /tmp/ready"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                  start_interval: 1s
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hc-wait",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            t0 = time.monotonic()
+            proj.up(timeout=30)
+            elapsed = time.monotonic() - t0
+            # Should NOT have waited the full start_period (15s).
+            # Service becomes ready after ~1s, start_interval is 1s,
+            # so health check passes within ~2-3s.  Sandbox creation
+            # adds ~2-3s.  Total should be well under 15s.
+            assert elapsed < 10.0, f"up() took {elapsed:.1f}s, should be <10s"
+            # Verify the service is actually healthy
+            _, ec = proj.services["app"].run("test -f /tmp/ready")
+            assert ec == 0
+        finally:
+            proj.down()
+
+
+# ------------------------------------------------------------------ #
+#  _HealthMonitor unit tests (mock-based, no sandbox needed)           #
+# ------------------------------------------------------------------ #
+
+
+class TestHealthMonitor:
+    """Unit tests for _HealthMonitor using a mock sandbox."""
+
+    @staticmethod
+    def _mock_sb(results: list[tuple[str, int]]):
+        """Create a mock sandbox that returns results in order."""
+        sb = MagicMock()
+        call_count = 0
+
+        def run_side_effect(cmd, timeout=None):
+            nonlocal call_count
+            if call_count < len(results):
+                result = results[call_count]
+                call_count += 1
+                return result
+            return ("", 0)
+
+        sb.run = MagicMock(side_effect=run_side_effect)
+        return sb
+
+    def test_immediate_healthy(self):
+        """Monitor sets status to healthy on first successful check."""
+        sb = self._mock_sb([("", 0)])
+        mon = _HealthMonitor(sb, "true", interval=10, timeout=5)
+        time.sleep(0.5)
+        assert mon.status == "healthy"
+        mon.stop()
+
+    def test_healthy_after_failures(self):
+        """Monitor becomes healthy after initial failures."""
+        sb = self._mock_sb([("", 1), ("", 1), ("", 0)])
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=10, start_interval=0.1,
+        )
+        time.sleep(1.0)
+        assert mon.status == "healthy"
+        mon.stop()
+
+    def test_unhealthy_after_retries(self):
+        """Monitor marks unhealthy after retries consecutive failures."""
+        sb = self._mock_sb([("", 1)] * 20)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.0)
+        assert mon.status == "unhealthy"
+        mon.stop()
+
+    def test_start_period_suppresses_unhealthy(self):
+        """Failures during start_period don't mark unhealthy."""
+        sb = self._mock_sb([("", 1)] * 50)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=2.0, retries=3,
+        )
+        # During start_period, should stay "starting" not "unhealthy"
+        time.sleep(0.5)
+        assert mon.status == "starting"
+        mon.stop()
+
+    def test_stop_terminates_thread(self):
+        """stop() should terminate the background thread promptly."""
+        sb = self._mock_sb([("", 1)] * 100)
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5, start_period=100,
+        )
+        mon.stop()
+        assert not mon._thread.is_alive()
+
+    def test_start_interval_used_during_start_period(self):
+        """During start_period, checks use start_interval, not interval."""
+        sb = self._mock_sb([("", 1)] * 100)
+        mon = _HealthMonitor(
+            sb, "check",
+            interval=60.0,          # very long — would timeout test if used
+            start_interval=0.1,     # fast — allows multiple checks
+            start_period=5.0,
+            timeout=5, retries=3,
+        )
+        time.sleep(1.0)
+        # Should have made several calls (using start_interval=0.1s)
+        call_count = sb.run.call_count
+        assert call_count >= 3, f"expected >=3 calls, got {call_count}"
+        mon.stop()
+
+    def test_healthy_resets_failure_count(self):
+        """A successful check resets consecutive failure counter."""
+        # Fail twice, succeed once, fail twice more → should NOT be unhealthy
+        # because the success reset the counter
+        sb = self._mock_sb([("", 1), ("", 1), ("", 0), ("", 1), ("", 1)])
+        mon = _HealthMonitor(
+            sb, "check", interval=0.1, timeout=5,
+            start_period=0, retries=3,
+        )
+        time.sleep(1.5)
+        # Should be healthy (the success in the middle reset the counter)
+        assert mon.status == "healthy"
+        mon.stop()
