@@ -217,17 +217,17 @@ fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool) {
         }
     }
 
-    // vm_mode: mount tmpfs at /tmp and /run to avoid overlayfs inode issues
+    // vm_mode: mount tmpfs at /run to avoid overlayfs inode issues.
+    // Note: /tmp is NOT tmpfs'd because VM images may store files there
+    // (e.g. OpenCore.img for macOS).
     if vm_mode {
-        for (path, opts) in &[("/tmp", "mode=1777"), ("/run", "mode=0755")] {
-            let target = format!("{}{}", rootfs, path);
-            let _ = std::fs::create_dir_all(&target);
-            if let Err(e) = mnt(
-                Some("tmpfs"), &target, Some("tmpfs"),
-                MsFlags::empty(), Some(opts),
-            ) {
-                log::debug!("vm_mode tmpfs {} failed: {}", path, e);
-            }
+        let run_target = format!("{}/run", rootfs);
+        let _ = std::fs::create_dir_all(&run_target);
+        if let Err(e) = mnt(
+            Some("tmpfs"), &run_target, Some("tmpfs"),
+            MsFlags::empty(), Some("mode=0755"),
+        ) {
+            log::debug!("vm_mode tmpfs /run failed: {}", e);
         }
     }
 }

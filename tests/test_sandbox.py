@@ -2101,8 +2101,8 @@ class TestVmMode:
         finally:
             sb.delete()
 
-    def test_tmp_is_tmpfs(self, tmp_path, shared_cache_dir):
-        """vm_mode mounts tmpfs at /tmp."""
+    def test_tmp_writable(self, tmp_path, shared_cache_dir):
+        """vm_mode /tmp is writable (stays on overlayfs to preserve image files)."""
         config = SandboxConfig(
             image=TEST_IMAGE,
             vm_mode=True,
@@ -2111,9 +2111,9 @@ class TestVmMode:
         )
         sb = Sandbox(config, name="vm-tmp")
         try:
-            out, ec = sb.run("stat -f -c %T /tmp 2>/dev/null || stat -f /tmp 2>/dev/null")
+            out, ec = sb.run("touch /tmp/test_file && echo ok")
             assert ec == 0
-            assert "tmpfs" in out.lower(), f"/tmp should be tmpfs, got: {out}"
+            assert "ok" in out
         finally:
             sb.delete()
 
