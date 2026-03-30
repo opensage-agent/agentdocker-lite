@@ -253,13 +253,14 @@ class QemuVM:
             msg["arguments"] = arguments
         return self._qmp_exec(command, arguments or None)
 
-    def hmp(self, command: str) -> str:
+    def hmp(self, command: str, timeout: int = 120) -> str:
         """Execute an HMP command via QMP.
 
         Useful for ``savevm``, ``loadvm``, ``info snapshots`` etc.
 
         Args:
             command: HMP command string.
+            timeout: Timeout in seconds (loadvm/savevm can take 30-60s).
 
         Returns:
             Command output string.
@@ -267,6 +268,7 @@ class QemuVM:
         resp = self._qmp_exec(
             "human-monitor-command",
             {"command-line": command},
+            timeout=timeout,
         )
         if "error" in resp:
             raise RuntimeError(f"HMP command failed: {resp['error']}")
@@ -365,7 +367,8 @@ class QemuVM:
         self._sb.run(f"chmod +x {_QMP_HELPER}")
 
     def _qmp_exec(
-        self, command: str, arguments: dict | None = None
+        self, command: str, arguments: dict | None = None,
+        timeout: int = 30,
     ) -> dict:
         """Send a QMP command.
 
@@ -389,7 +392,7 @@ class QemuVM:
                     host_sock_str = str(host_sock)
             if host_sock_str and Path(host_sock_str).exists():
                 from agentdocker_lite._core import py_qmp_send
-                output = py_qmp_send(host_sock_str, msg_json, 30)
+                output = py_qmp_send(host_sock_str, msg_json, timeout)
                 return json.loads(output)
         except (OSError, ImportError):
             pass  # fall through to sandbox-side helper
