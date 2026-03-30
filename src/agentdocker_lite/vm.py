@@ -121,7 +121,18 @@ class QemuVM:
         """
         self._install_qmp_helper()
         cmd = self._build_cmd()
-        self._handle = self._sb.run_background(cmd)
+
+        if self._cmd_override:
+            # Complex commands with special shell chars (e.g. parentheses
+            # in Apple SMC key) break when double-shell-wrapped.  Write
+            # to a script file to avoid quoting issues.
+            script = f"#!/bin/sh\nexec {cmd}\n"
+            self._sb.write_file("/tmp/.adl_qemu_launch.sh", script)
+            self._sb.run("chmod +x /tmp/.adl_qemu_launch.sh")
+            self._handle = self._sb.run_background("/tmp/.adl_qemu_launch.sh")
+        else:
+            self._handle = self._sb.run_background(cmd)
+
         self._wait_qmp(timeout)
         logger.info(
             "VM started: disk=%s memory=%s cpus=%d display=%s",
