@@ -55,6 +55,11 @@ class QemuVM:
             Default ``"none"`` (headless — use :meth:`screenshot`).
         extra_args: Additional QEMU command-line arguments.
         qmp_socket: QMP Unix socket path inside the sandbox.
+        cmd_override: Complete QEMU command line string.  When set,
+            ``disk``/``memory``/``cpus``/``display``/``extra_args`` are
+            ignored and only the ``-qmp`` socket argument is appended.
+            Use this for complex VM setups (e.g. Windows/macOS with
+            pflash, TPM, custom networking).
 
     Example::
 
@@ -78,12 +83,13 @@ class QemuVM:
     def __init__(
         self,
         sandbox: Sandbox,
-        disk: str,
+        disk: str = "",
         memory: str = "2G",
         cpus: int = 2,
         display: str = "none",
         extra_args: list[str] | None = None,
         qmp_socket: str = _QMP_SOCKET,
+        cmd_override: str | None = None,
     ):
         self._sb = sandbox
         self._disk = disk
@@ -92,6 +98,7 @@ class QemuVM:
         self._display = display
         self._extra_args = extra_args or []
         self._qmp_path = qmp_socket
+        self._cmd_override = cmd_override
         self._handle: str | None = None
 
     # ------------------------------------------------------------------ #
@@ -278,14 +285,25 @@ class QemuVM:
     # ------------------------------------------------------------------ #
 
     def _build_cmd(self) -> str:
-        """Build the QEMU command line."""
+        """Build the QEMU command line.
+
+        If *cmd_override* was provided at construction, use it verbatim
+        (only the ``-qmp`` socket arg is appended).  Otherwise build a
+        standard command from the disk/memory/cpus/display parameters.
+        """
+        qmp_arg = f"-qmp unix:{self._qmp_path},server,nowait"
+
+        if self._cmd_override:
+            # Caller provides full command; we only append QMP socket.
+            return f"{self._cmd_override} {qmp_arg}"
+
         args = [
             "qemu-system-x86_64",
             "-enable-kvm",
             "-m", self._memory,
             "-smp", str(self._cpus),
             "-drive", f"file={self._disk},format=qcow2,if=virtio",
-            "-qmp", f"unix:{self._qmp_path},server,nowait",
+            qmp_arg,
             "-display", self._display,
             "-no-shutdown",
         ]
