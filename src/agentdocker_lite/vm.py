@@ -126,10 +126,15 @@ class QemuVM:
             # Complex commands with special shell chars (e.g. parentheses
             # in Apple SMC key) break when double-shell-wrapped.  Write
             # to a script file to avoid quoting issues.
+            #
+            # Use a path on a volume mount (not /tmp which may be tmpfs
+            # in vm_mode, hiding overlayfs writes from write_file).
+            # QMP socket dir is on a volume, use its parent.
+            script_path = str(Path(self._qmp_path).parent / ".adl_qemu_launch.sh")
             script = f"#!/bin/sh\nexec {cmd}\n"
-            self._sb.write_file("/tmp/.adl_qemu_launch.sh", script)
-            self._sb.run("chmod +x /tmp/.adl_qemu_launch.sh")
-            self._handle = self._sb.run_background("/tmp/.adl_qemu_launch.sh")
+            self._sb.write_file(script_path, script)
+            self._sb.run(f"chmod +x {shlex.quote(script_path)}")
+            self._handle = self._sb.run_background(script_path)
         else:
             self._handle = self._sb.run_background(cmd)
 
