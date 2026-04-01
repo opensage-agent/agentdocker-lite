@@ -545,7 +545,7 @@ class QemuVM:
         try:
             self._qga_send("guest-ping", timeout=timeout)
             return True
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, FileNotFoundError, AttributeError):
             return False
 
     def wait_guest_ready(self, timeout: int = 300) -> None:
