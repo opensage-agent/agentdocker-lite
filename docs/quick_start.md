@@ -332,7 +332,7 @@ config = SandboxConfig(
 
 ## QEMU/KVM Virtual Machines
 
-Run QEMU/KVM VMs inside sandboxes for GUI agent training (e.g., OSWorld). `QemuVM` manages the QEMU process and provides QMP-based `savevm`/`loadvm` for fast episode reset (1-5s vs 30-120s cold restart).
+Run QEMU/KVM VMs inside sandboxes for GUI agent training (e.g., OSWorld). `QemuVM` manages the QEMU process, provides QMP-based `savevm`/`loadvm` for fast episode reset (1-5s), and QEMU Guest Agent (QGA) for executing commands inside the VM guest.
 
 ```python
 from nitrobox import Sandbox, SandboxConfig
@@ -346,17 +346,38 @@ sb = Sandbox(SandboxConfig(
 
 vm = QemuVM(sb, disk="/vms/osworld.qcow2", memory="4G", cpus=4)
 vm.start()              # boot VM, wait for QMP
+vm.wait_guest_ready()   # wait for qemu-ga in the guest
 vm.savevm("ready")      # snapshot VM state
 
 # Episode loop:
 for episode in range(1000):
     vm.loadvm("ready")  # restore snapshot (1-5s)
+    out, ec = vm.guest_exec("whoami")    # run command in guest via QGA
     screenshot = vm.screenshot()
     # ... agent actions ...
 
 vm.stop()
 sb.delete()
 ```
+
+### Guest Agent (QGA)
+
+`QemuVM` automatically sets up a virtio-serial channel for the QEMU Guest Agent. The guest must have `qemu-ga` installed and running (most cloud images include it; for custom images: `apt install qemu-guest-agent`).
+
+```python
+# Execute commands inside the VM guest
+out, ec = vm.guest_exec("cat /etc/os-release")
+
+# File I/O
+data = vm.guest_file_read("/etc/hostname")
+vm.guest_file_write("/tmp/config.json", b'{"key": "value"}')
+
+# Readiness check
+if vm.guest_ping():
+    print("Guest agent responsive")
+```
+
+After `loadvm`, QGA resumes immediately — no need to call `wait_guest_ready()` again.
 
 Rootless KVM requires the user to be in the `kvm` group (`sudo usermod -aG kvm $USER`).
 

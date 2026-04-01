@@ -75,7 +75,7 @@ src/nitrobox/
 ├── rootfs.py           OCI image management + layer cache
 ├── _registry.py        Pure-Python OCI registry client
 ├── checkpoint.py       CRIU checkpoint/restore
-├── vm.py               QEMU/KVM VM manager
+├── vm.py               QEMU/KVM VM manager + QGA guest execution
 ├── cli.py              CLI commands (nitrobox ps/kill/cleanup)
 ├── compose/            Docker Compose compatibility
 │   ├── _parse.py       YAML parsing + service definitions
