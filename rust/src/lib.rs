@@ -1,4 +1,4 @@
-//! adl-core: Rust core for agentdocker-lite.
+//! nitrobox-core: Rust core for nitrobox.
 //!
 //! Provides direct syscall interfaces for Linux namespace sandboxing,
 //! replacing Python ctypes/subprocess string concatenation.
@@ -349,7 +349,7 @@ fn py_qmp_send(socket_path: &str, command_json: &str, timeout_secs: u64) -> PyRe
 // Module definition
 // ======================================================================
 
-/// agentdocker-lite Rust core: direct syscall interface for namespace sandboxing.
+/// nitrobox Rust core: direct syscall interface for namespace sandboxing.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // types

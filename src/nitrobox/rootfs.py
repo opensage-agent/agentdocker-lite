@@ -173,7 +173,7 @@ def _get_image_diff_ids(image_name: str) -> list[str] | None:
                 pass
 
     # Fallback: registry API (no Docker/Podman needed)
-    from agentdocker_lite._registry import get_diff_ids_from_registry
+    from nitrobox._registry import get_diff_ids_from_registry
     return get_diff_ids_from_registry(image_name)
 
 
@@ -225,7 +225,7 @@ def get_image_config(image_name: str) -> dict | None:
                     }
 
     # Fallback: registry API
-    from agentdocker_lite._registry import get_config_from_registry
+    from nitrobox._registry import get_config_from_registry
     return get_config_from_registry(image_name)
 
 
@@ -241,7 +241,7 @@ def prepare_rootfs_layers_from_docker(
 
     Args:
         image_name: Docker image (e.g. ``"ubuntu:22.04"``).
-        cache_dir: Root cache directory (e.g. ``~/.cache/agentdocker_lite/rootfs``).
+        cache_dir: Root cache directory (e.g. ``~/.cache/nitrobox/rootfs``).
         pull: Pull the image first.
 
     Returns:
@@ -314,7 +314,7 @@ def _extract_layers_from_registry(
 ) -> None:
     """Download and extract layers directly from registry (no Docker/Podman)."""
     import gzip
-    from agentdocker_lite._registry import pull_image_layers
+    from nitrobox._registry import pull_image_layers
 
     blobs = pull_image_layers(image_name, needed_diff_ids)
     for diff_id, compressed_blob in blobs.items():

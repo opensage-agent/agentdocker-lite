@@ -1,4 +1,4 @@
-"""Persistent shell process for agentdocker-lite sandboxes.
+"""Persistent shell process for nitrobox sandboxes.
 
 Spawns a shell inside a Linux namespace sandbox via Rust _core.spawn_sandbox(),
 then communicates with it via stdin/stdout pipes and a signal fd protocol.
@@ -15,7 +15,7 @@ import threading
 import time
 from typing import TypedDict
 
-from agentdocker_lite._errors import SandboxInitError, SandboxTimeoutError
+from nitrobox._errors import SandboxInitError, SandboxTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class SpawnConfig(TypedDict, total=False):
     env_dir: str | None
 
 
-    # SpawnResult is a Rust pyclass (agentdocker_lite._core.PySpawnResult)
+    # SpawnResult is a Rust pyclass (nitrobox._core.PySpawnResult)
     # with typed attributes: pid, stdin_fd, stdout_fd, signal_r_fd,
     # signal_w_fd_num, master_fd, pidfd.
 
@@ -117,7 +117,7 @@ class _PersistentShell:
         if self.pid is not None and self.alive:
             self.kill()
 
-        from agentdocker_lite._core import py_spawn_sandbox
+        from nitrobox._core import py_spawn_sandbox
 
         result = py_spawn_sandbox(self._config)
 

@@ -1,4 +1,4 @@
-"""CLI entry point: python -m agentdocker_lite <command>."""
+"""CLI entry point: python -m nitrobox <command>."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ import sys
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m agentdocker_lite",
-        description="agentdocker-lite management utilities",
+        prog="python -m nitrobox",
+        description="nitrobox management utilities",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable debug logging"
@@ -25,8 +25,8 @@ def main() -> int:
     import os as _os
     cleanup_parser.add_argument(
         "--env-base-dir",
-        default=f"/tmp/agentdocker_lite_{_os.getuid()}",
-        help="Base directory for sandbox state (default: /tmp/agentdocker_lite_<uid>)",
+        default=f"/tmp/nitrobox_{_os.getuid()}",
+        help="Base directory for sandbox state (default: /tmp/nitrobox_<uid>)",
     )
 
     args = parser.parse_args()
@@ -37,7 +37,7 @@ def main() -> int:
     )
 
     if args.command == "cleanup":
-        from agentdocker_lite.sandbox import Sandbox
+        from nitrobox.sandbox import Sandbox
 
         cleaned = Sandbox.cleanup_stale(env_base_dir=args.env_base_dir)
         print(f"Cleaned {cleaned} stale sandbox(es).")

@@ -1,13 +1,13 @@
 [package]
-name = "adl-core"
+name = "nitrobox-core"
 version = "0.0.5"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "Rust core for agentdocker-lite: Linux namespace sandbox syscall interface"
+description = "Rust core for nitrobox: Linux namespace sandbox syscall interface"
 
 [lib]
-name = "adl_core"
+name = "nitrobox_core"
 crate-type = ["cdylib", "rlib"]  # rlib needed for stub_gen binary
 path = "rust/src/lib.rs"
 

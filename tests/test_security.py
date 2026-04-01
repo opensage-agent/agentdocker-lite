@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
-from agentdocker_lite._errors import SandboxInitError, SandboxKernelError
-from agentdocker_lite._core import py_landlock_abi_version as _landlock_abi_version
+from nitrobox import Sandbox, SandboxConfig
+from nitrobox._errors import SandboxInitError, SandboxKernelError
+from nitrobox._core import py_landlock_abi_version as _landlock_abi_version
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -263,7 +263,7 @@ class TestEntrypoint:
         )
         assert config.entrypoint is None  # not set yet
 
-        with patch("agentdocker_lite.rootfs.get_image_config", return_value=fake_cfg):
+        with patch("nitrobox.rootfs.get_image_config", return_value=fake_cfg):
             sb = Sandbox(config, name="ep-auto")
 
         try:
@@ -418,7 +418,7 @@ class TestUserNamespace:
 
     def test_whiteout_strategy(self, userns_sandbox):
         """Whiteout strategy should be detected based on kernel version."""
-        from agentdocker_lite.rootfs import _detect_whiteout_strategy
+        from nitrobox.rootfs import _detect_whiteout_strategy
         strategy = _detect_whiteout_strategy()
         assert strategy in ("xattr", "userns")
         assert userns_sandbox.features.get("whiteout") == strategy
@@ -648,7 +648,7 @@ class TestSharedNetwork:
     def test_shared_netns_between_sandboxes(self, tmp_path, shared_cache_dir):
         """Two sandboxes sharing a SharedNetwork have the same netns."""
         self._skip_if_not_rootless()
-        from agentdocker_lite.compose import SharedNetwork
+        from nitrobox.compose import SharedNetwork
 
         net = SharedNetwork("test-net")
         try:
@@ -685,7 +685,7 @@ class TestSharedNetwork:
     def test_different_shared_networks_isolated(self, tmp_path, shared_cache_dir):
         """Sandboxes on different SharedNetworks have different netns."""
         self._skip_if_not_rootless()
-        from agentdocker_lite.compose import SharedNetwork
+        from nitrobox.compose import SharedNetwork
 
         net_a = SharedNetwork("net-a")
         net_b = SharedNetwork("net-b")
@@ -718,7 +718,7 @@ class TestSharedNetwork:
     def test_shared_network_sandbox_runs_commands(self, tmp_path, shared_cache_dir):
         """Sandbox with shared userns can run commands normally."""
         self._skip_if_not_rootless()
-        from agentdocker_lite.compose import SharedNetwork
+        from nitrobox.compose import SharedNetwork
 
         net = SharedNetwork("cmd-test")
         try:
@@ -766,7 +766,7 @@ class TestFailedCreationCleanup:
         self._skip_if_root()
         env_dir = tmp_path / "envs"
         # Use an invalid shell to force startup failure
-        from agentdocker_lite.sandbox import Sandbox as RootlessSandbox
+        from nitrobox.sandbox import Sandbox as RootlessSandbox
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(env_dir),
@@ -866,7 +866,7 @@ class TestMappedUidCleanup:
     def _skip_if_no_full_mapping(self):
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        from agentdocker_lite.sandbox import Sandbox as RootlessSandbox
+        from nitrobox.sandbox import Sandbox as RootlessSandbox
         if RootlessSandbox._detect_subuid_range() is None:
             pytest.skip("full uid mapping not configured (no subuid entry)")
 
@@ -1248,18 +1248,18 @@ class TestLandlockRootful:
     def test_landlock_unavailable_raises(self):
         """Setting Landlock params on unsupported kernel should raise SandboxKernelError."""
         from unittest.mock import patch
-        from agentdocker_lite.sandbox import Sandbox
+        from nitrobox.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, writable_paths=["/workspace"])
-        with patch("agentdocker_lite._core.py_landlock_abi_version", return_value=0):
+        with patch("nitrobox._core.py_landlock_abi_version", return_value=0):
             with pytest.raises(SandboxKernelError, match="Landlock not available"):
                 Sandbox._build_landlock_config(config)
 
     def test_allowed_ports_low_abi_raises(self):
         """allowed_ports on ABI < 4 should raise SandboxKernelError."""
         from unittest.mock import patch
-        from agentdocker_lite.sandbox import Sandbox
+        from nitrobox.sandbox import Sandbox
         config = SandboxConfig(image=TEST_IMAGE, allowed_ports=[80])
-        with patch("agentdocker_lite._core.py_landlock_abi_version", return_value=3):
+        with patch("nitrobox._core.py_landlock_abi_version", return_value=3):
             with pytest.raises(SandboxKernelError, match="ABI v4"):
                 Sandbox._build_landlock_config(config)
 

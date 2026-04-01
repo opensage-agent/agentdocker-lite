@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
-from agentdocker_lite.vm import QemuVM
+from nitrobox import Sandbox, SandboxConfig
+from nitrobox.vm import QemuVM
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -222,18 +222,18 @@ class TestRustQMP:
 
     def test_binding_importable(self):
         """py_qmp_send is importable from _core."""
-        from agentdocker_lite._core import py_qmp_send
+        from nitrobox._core import py_qmp_send
         assert callable(py_qmp_send)
 
     def test_nonexistent_socket_raises(self):
         """Connecting to a non-existent socket raises OSError."""
-        from agentdocker_lite._core import py_qmp_send
+        from nitrobox._core import py_qmp_send
         with pytest.raises(OSError):
             py_qmp_send("/tmp/nonexistent_qmp_socket_12345.sock", '{"execute":"query-status"}')
 
     def test_invalid_socket_path_raises(self):
         """Empty socket path raises OSError."""
-        from agentdocker_lite._core import py_qmp_send
+        from nitrobox._core import py_qmp_send
         with pytest.raises(OSError):
             py_qmp_send("", '{"execute":"query-status"}')
 
@@ -247,16 +247,16 @@ class TestRustQMP:
         qmp_dir.mkdir()
         # The volume was already set up when vm_sandbox was created,
         # but /vm is already a volume mount, so use that path.
-        qmp_path = "/vm/.adl_qmp_test.sock"
+        qmp_path = "/vm/.nbx_qmp_test.sock"
 
         vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1,
                     qmp_socket=qmp_path)
         vm.start(timeout=30)
         try:
             import json
-            from agentdocker_lite._core import py_qmp_send
+            from nitrobox._core import py_qmp_send
             # /vm is bind-mounted to vm_dir on host
-            host_sock = Path(vm_dir) / ".adl_qmp_test.sock"
+            host_sock = Path(vm_dir) / ".nbx_qmp_test.sock"
             if not host_sock.exists():
                 pytest.skip("QMP socket not found on host volume")
             msg = json.dumps({"execute": "query-status"})

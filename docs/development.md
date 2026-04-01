@@ -18,7 +18,7 @@ cargo run --bin stub_gen --release
 
 ## Vendored binaries
 
-The pip package bundles static binaries in `src/agentdocker_lite/_vendor/`:
+The pip package bundles static binaries in `src/nitrobox/_vendor/`:
 
 | Binary | Purpose | Size | Source |
 |---|---|---|---|
@@ -28,7 +28,7 @@ The pip package bundles static binaries in `src/agentdocker_lite/_vendor/`:
 ### Regenerating protobuf
 
 ```bash
-protoc --python_out=src/agentdocker_lite/_vendor/ rpc.proto
+protoc --python_out=src/nitrobox/_vendor/ rpc.proto
 ```
 
 ## Running tests
@@ -66,7 +66,7 @@ Sandbox(config, name)
 ## Project structure
 
 ```
-src/agentdocker_lite/
+src/nitrobox/
 ├── config.py           SandboxConfig + parsers + Docker compat
 ├── sandbox.py          Sandbox class (single unified implementation)
 ├── _errors.py          Structured error types (SandboxError hierarchy)
@@ -76,7 +76,7 @@ src/agentdocker_lite/
 ├── _registry.py        Pure-Python OCI registry client
 ├── checkpoint.py       CRIU checkpoint/restore
 ├── vm.py               QEMU/KVM VM manager
-├── cli.py              CLI commands (adl ps/kill/cleanup)
+├── cli.py              CLI commands (nitrobox ps/kill/cleanup)
 ├── compose/            Docker Compose compatibility
 │   ├── _parse.py       YAML parsing + service definitions
 │   ├── _network.py     SharedNetwork + health checks

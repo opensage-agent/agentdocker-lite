@@ -27,8 +27,8 @@ All notable changes to this project will be documented in this file.
 - **Docker compatibility layer**: `SandboxConfig.from_docker()` accepts Docker Python SDK kwargs, `SandboxConfig.from_docker_run()` parses `docker run` CLI strings. Zero-effort migration from Docker.
 - **Image config auto-apply**: `Sandbox()` automatically reads OCI image config and backfills `WORKDIR` and `ENV` — user values always take precedence.
 - **Resource limit sugar**: `cpu_max` accepts `"0.5"`, `"2"`, `"50%"` (not just raw cgroup format). `io_max` accepts `"/dev/sda 10mb"`. `_parse_size` supports `"10mb"`, `"1gb"` suffixes.
-- **SWE-bench benchmark**: `examples/bench_swebench.py` — reproducible Docker vs adl comparison with SWE-bench-style evaluation loop.
-- **GitHub Pages docs**: mkdocs-material site at opensage-agent.github.io/agentdocker-lite, auto-deployed on push.
+- **SWE-bench benchmark**: `examples/bench_swebench.py` — reproducible Docker vs nitrobox comparison with SWE-bench-style evaluation loop.
+- **GitHub Pages docs**: mkdocs-material site at opensage-agent.github.io/nitrobox, auto-deployed on push.
 - **Auto-release on tag push**: `git tag v0.0.x && git push --tags` triggers PyPI publish + GitHub Release with auto-generated notes.
 - **Branch protection**: main requires CI to pass via PR.
 
@@ -47,7 +47,7 @@ All notable changes to this project will be documented in this file.
 - **Structured error types**: `SandboxError` hierarchy (`SandboxInitError`, `SandboxConfigError`, `SandboxKernelError`, `SandboxTimeoutError`) replaces generic `RuntimeError`/`ValueError`.
 - **Init deduplication**: Extracted `_init_common_state`, `_build_spawn_config`, `_finalize_init` helpers — `_init_rootful`/`_init_userns` share ~60% common logic instead of duplicating it.
 - **cgroup via Rust**: `_setup_cgroup`/`_cleanup_cgroup` now delegate to `py_create_cgroup`/`py_apply_cgroup_limits`/`py_cleanup_cgroup` from Rust `_core` instead of manual Python file writes.
-- **Landlock config merged**: `_build_landlock_config` and `_landlock_lists` merged into single method, dead adl-seccomp string config removed.
+- **Landlock config merged**: `_build_landlock_config` and `_landlock_lists` merged into single method, dead nbx-seccomp string config removed.
 - **Rootfs resolution unified**: `_resolve_btrfs_rootfs`/`_resolve_flat_rootfs` share `_resolve_cached_rootfs` helper for lock-check-prepare pattern.
 - **Type annotations**: `Optional[X]` → `X | None` throughout (Python 3.12+ style).
 - **Type safety**: `SandboxFeatures` TypedDict, auto-generated `.pyi` stubs via pyo3-stub-gen, 0 pyright errors.
@@ -57,14 +57,14 @@ All notable changes to this project will be documented in this file.
 
 ### Rootless mode parity
 - **Layer cache in rootless mode**: Docker image layers are cached and shared via `userxattr` overlayfs (kernel 5.11+). No more flat rootfs extraction.
-- **Full security hardening in rootless**: seccomp-bpf, capability drop, masked/read-only paths — all enabled via `adl-seccomp` with `skip_dev` marker.
+- **Full security hardening in rootless**: seccomp-bpf, capability drop, masked/read-only paths — all enabled via `nbx-seccomp` with `skip_dev` marker.
 - **Rootless pasta networking**: pasta runs inside the user namespace (has `CAP_SYS_ADMIN`), creating netns via `unshare --net` + bind mount.
 - **localhost works for port_map**: `--ipv4-only` default resolves pasta IPv6 connection reset bug (also affects Podman rootless). New `ipv6` config option.
 
 ### Bug fixes
 - **seccomp mmap fix**: `sc6()` for 6-arg syscalls — `mmap` was missing offset parameter (`r9` uninitialized), causing `EINVAL` after read-only code block changed register allocation.
 - **Hostname CI fallback**: try `/proc/sys/kernel/hostname` first, fall back to `hostname` command.
-- **env_base_dir uid isolation**: `/tmp/agentdocker_lite_{uid}` prevents cross-user permission conflicts.
+- **env_base_dir uid isolation**: `/tmp/nitrobox_{uid}` prevents cross-user permission conflicts.
 
 ### Internal
 - Moved userns init logic from `rootful.py` to `rootless.py` (1374→1018 / 43→410 lines).
@@ -75,7 +75,7 @@ All notable changes to this project will be documented in this file.
 
 ### Breaking changes
 - Requires Python >=3.12 (was >=3.10). Needed for `os.setns()` in rootless popen.
-- Default `env_base_dir` changed from `/tmp/agentdocker_lite` to `/tmp/agentdocker_lite_{uid}`.
+- Default `env_base_dir` changed from `/tmp/nitrobox` to `/tmp/nitrobox_{uid}`.
 
 ## [0.0.3] - 2026-03-21
 
@@ -108,7 +108,7 @@ All notable changes to this project will be documented in this file.
 
 ### Internal
 - Move userns init logic from rootful.py to rootless.py, full UID mapping for SkyRL.
-- Rewrite `adl-seccomp` as zero-libc static binary (13KB), mount /proc and /dev inside it.
+- Rewrite `nbx-seccomp` as zero-libc static binary (13KB), mount /proc and /dev inside it.
 - Rewrite pasta invocation to match Podman's approach.
 - Share rootfs cache across tests via session-scoped fixture.
 
@@ -135,4 +135,4 @@ All notable changes to this project will be documented in this file.
 
 ## [0.0.1] - 2026-03-11
 
-Initial release of agentdocker-lite.
+Initial release of nitrobox.

@@ -9,7 +9,7 @@ import shlex
 import time
 from typing import Any
 
-from agentdocker_lite.sandbox import Sandbox
+from nitrobox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 

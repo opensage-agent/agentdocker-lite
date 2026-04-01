@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 

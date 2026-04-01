@@ -17,16 +17,16 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
-from agentdocker_lite._errors import (
+from nitrobox._errors import (
     SandboxConfigError,
     SandboxInitError,
     SandboxKernelError,
     SandboxTimeoutError,
 )
-from agentdocker_lite.config import SandboxConfig, cap_names_to_numbers
+from nitrobox.config import SandboxConfig, cap_names_to_numbers
 
 if TYPE_CHECKING:
-    from agentdocker_lite._shell import _PersistentShell
+    from nitrobox._shell import _PersistentShell
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def _apply_image_defaults(config: SandboxConfig) -> None:
     """
     if not config.image:
         return
-    from agentdocker_lite.rootfs import get_image_config
+    from nitrobox.rootfs import get_image_config
 
     img_cfg = get_image_config(config.image)
     if not img_cfg:
@@ -114,7 +114,7 @@ class Sandbox:
 
     Example::
 
-        from agentdocker_lite import Sandbox, SandboxConfig
+        from nitrobox import Sandbox, SandboxConfig
 
         config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
         with Sandbox(config, name="worker-0") as sb:
@@ -444,7 +444,7 @@ class Sandbox:
             except (OSError, ValueError):
                 pass
 
-        from agentdocker_lite._core import py_process_madvise_cold
+        from nitrobox._core import py_process_madvise_cold
         return py_process_madvise_cold(pidfd)
 
     # -- Docker image export ----------------------------------------------- #
@@ -649,7 +649,7 @@ class Sandbox:
 
         lowerdir_spec = getattr(self, "_lowerdir_spec", None) or base_rootfs
         if not self._userns and rootfs and lowerdir_spec and work:
-            from agentdocker_lite._core import py_mount_overlay
+            from nitrobox._core import py_mount_overlay
             py_mount_overlay(
                 str(lowerdir_spec), str(upper), str(work), str(rootfs),
             )
@@ -753,7 +753,7 @@ class Sandbox:
             Number of cleaned-up sandboxes.
         """
         if not env_base_dir:
-            env_base_dir = f"/tmp/agentdocker_lite_{os.getuid()}"
+            env_base_dir = f"/tmp/nitrobox_{os.getuid()}"
         base = Path(env_base_dir)
         if not base.exists():
             return 0
@@ -805,7 +805,7 @@ class Sandbox:
                     capture_output=True,
                 )
 
-            netns_path = Path(f"/run/netns/adl-{entry.name}")
+            netns_path = Path(f"/run/netns/nitrobox-{entry.name}")
             if netns_path.exists():
                 subprocess.run(["fuser", "-k", str(netns_path)], capture_output=True)
                 subprocess.run(["umount", str(netns_path)], capture_output=True)
@@ -814,7 +814,7 @@ class Sandbox:
                 except OSError:
                     pass
 
-            cgroup_path = Path(f"/sys/fs/cgroup/agentdocker_lite/{entry.name}")
+            cgroup_path = Path(f"/sys/fs/cgroup/nitrobox/{entry.name}")
             if cgroup_path.exists():
                 kill_file = cgroup_path / "cgroup.kill"
                 if kill_file.exists():
@@ -1028,7 +1028,7 @@ class Sandbox:
             env_dir=str(self._env_dir),
         )
 
-        from agentdocker_lite._shell import _PersistentShell
+        from nitrobox._shell import _PersistentShell
         self._persistent_shell = _PersistentShell(
             spawn_cfg, ulimits=config.ulimits or None,  # type: ignore[arg-type]
         )
@@ -1052,7 +1052,7 @@ class Sandbox:
 
         # --- rootfs -------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        from agentdocker_lite.rootfs import _detect_whiteout_strategy
+        from nitrobox.rootfs import _detect_whiteout_strategy
         whiteout_strategy = _detect_whiteout_strategy()
 
         if whiteout_strategy == "none":
@@ -1104,7 +1104,7 @@ class Sandbox:
                         elif key == "io_max":
                             self._systemd_scope_properties.append(f"{sd_prop}={value}")
                         elif key == "cpu_shares":
-                            from agentdocker_lite.config import _convert_cpu_shares
+                            from nitrobox.config import _convert_cpu_shares
                             weight = _convert_cpu_shares(int(value))
                             self._systemd_scope_properties.append(f"{sd_prop}={weight}")
                         else:
@@ -1141,7 +1141,7 @@ class Sandbox:
             tmpfs_mounts=list(config.tmpfs) if config.tmpfs else [],
         )
 
-        from agentdocker_lite._shell import _PersistentShell
+        from nitrobox._shell import _PersistentShell
         self._persistent_shell = _PersistentShell(
             spawn_cfg, ulimits=config.ulimits or None,  # type: ignore[arg-type]
         )
@@ -1171,7 +1171,7 @@ class Sandbox:
             return Sandbox._resolve_btrfs_rootfs(image, rootfs_cache_dir), None
 
         # --- overlayfs: layer-level caching ---
-        from agentdocker_lite.rootfs import prepare_rootfs_layers_from_docker
+        from nitrobox.rootfs import prepare_rootfs_layers_from_docker
 
         t0 = time.monotonic()
         layer_dirs = prepare_rootfs_layers_from_docker(
@@ -1237,7 +1237,7 @@ class Sandbox:
     @staticmethod
     def _resolve_btrfs_rootfs(image: str, rootfs_cache_dir: Path) -> Path:
         """Resolve flat rootfs for btrfs backend."""
-        from agentdocker_lite.rootfs import prepare_btrfs_rootfs_from_docker
+        from nitrobox.rootfs import prepare_btrfs_rootfs_from_docker
         return Sandbox._resolve_cached_rootfs(
             image, rootfs_cache_dir, prepare_btrfs_rootfs_from_docker,
             verify_fn=Sandbox._verify_btrfs_subvolume,
@@ -1247,7 +1247,7 @@ class Sandbox:
     @staticmethod
     def _resolve_flat_rootfs(image: str, rootfs_cache_dir: Path) -> Path:
         """Resolve flat rootfs via docker export (for userns/rootless)."""
-        from agentdocker_lite.rootfs import prepare_rootfs_from_docker
+        from nitrobox.rootfs import prepare_rootfs_from_docker
         return Sandbox._resolve_cached_rootfs(
             image, rootfs_cache_dir, prepare_rootfs_from_docker,
             label="flat rootfs",
@@ -1356,7 +1356,7 @@ class Sandbox:
     # ================================================================== #
 
     def _setup_overlay(self) -> None:
-        from agentdocker_lite._core import py_mount_overlay
+        from nitrobox._core import py_mount_overlay
 
         assert self._upper_dir is not None and self._work_dir is not None
         for d in (self._upper_dir, self._work_dir, self._rootfs):
@@ -1494,12 +1494,12 @@ class Sandbox:
     def _overlay_mount(self, host_path: str, container_path: str) -> None:
         """Mount a host directory as copy-on-write via overlayfs."""
         import tempfile
-        from agentdocker_lite._core import py_mount_overlay
+        from nitrobox._core import py_mount_overlay
 
         target = self._rootfs / container_path.lstrip("/")
         target.mkdir(parents=True, exist_ok=True)
 
-        work_base = tempfile.mkdtemp(prefix="adl_cow_")
+        work_base = tempfile.mkdtemp(prefix="nbx_cow_")
         upper = Path(work_base) / "upper"
         work = Path(work_base) / "work"
         upper.mkdir()
@@ -1537,7 +1537,7 @@ class Sandbox:
         if not any(self._cgroup_limits.values()):
             return
 
-        from agentdocker_lite._core import (
+        from nitrobox._core import (
             py_apply_cgroup_limits,
             py_cgroup_v2_available,
             py_create_cgroup,
@@ -1571,7 +1571,7 @@ class Sandbox:
         if not self._cgroup_path or not self._cgroup_path.exists():
             return
         try:
-            from agentdocker_lite._core import py_cleanup_cgroup
+            from nitrobox._core import py_cleanup_cgroup
             py_cleanup_cgroup(str(self._cgroup_path))
         except OSError as e:
             logger.debug("cgroup cleanup (non-fatal): %s", e)
@@ -1600,7 +1600,7 @@ class Sandbox:
             )
 
         shell_pid = self._persistent_shell.pid
-        netns_name = f"adl-{self._name}"
+        netns_name = f"nitrobox-{self._name}"
 
         # Bind mount the sandbox's netns to /run/netns/ so pasta can open it
         # (pasta's internal sandboxing blocks direct /proc/{pid}/ns/net access).
@@ -1780,7 +1780,7 @@ class Sandbox:
         if not any([config.writable_paths, config.readable_paths, config.allowed_ports]):
             return [], [], [], False
 
-        from agentdocker_lite._core import py_landlock_abi_version
+        from nitrobox._core import py_landlock_abi_version
         abi = py_landlock_abi_version()
         if abi == 0:
             raise SandboxKernelError(

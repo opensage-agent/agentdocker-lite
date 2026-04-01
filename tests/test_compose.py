@@ -12,14 +12,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentdocker_lite.compose import (
+from nitrobox.compose import (
     ComposeProject,
     _Service,
     _parse_compose,
     _substitute,
     _topo_sort,
 )
-from agentdocker_lite.compose._project import _HealthMonitor
+from nitrobox.compose._project import _HealthMonitor
 
 
 # ------------------------------------------------------------------ #

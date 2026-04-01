@@ -1,4 +1,4 @@
-"""QEMU/KVM virtual machine manager for agentdocker-lite sandboxes.
+"""QEMU/KVM virtual machine manager for nitrobox sandboxes.
 
 Manages a QEMU process inside a sandbox and provides QMP (QEMU Monitor
 Protocol) communication for VM state management.  Designed for
@@ -6,8 +6,8 @@ OSWorld-style GUI agent training where fast VM reset is critical.
 
 Usage::
 
-    from agentdocker_lite import Sandbox, SandboxConfig
-    from agentdocker_lite.vm import QemuVM
+    from nitrobox import Sandbox, SandboxConfig
+    from nitrobox.vm import QemuVM
 
     sb = Sandbox(SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"]))
     vm = QemuVM(sb, disk="/path/to/vm.qcow2", memory="4G")
@@ -33,12 +33,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agentdocker_lite.sandbox import Sandbox
+    from nitrobox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
-_QMP_SOCKET = "/tmp/.adl_qmp.sock"
-_QMP_HELPER = "/tmp/.adl_qmp"  # static binary copied into sandbox
+_QMP_SOCKET = "/tmp/.nbx_qmp.sock"
+_QMP_HELPER = "/tmp/.nbx_qmp"  # static binary copied into sandbox
 
 
 class QemuVM:
@@ -130,7 +130,7 @@ class QemuVM:
             # Use a path on a volume mount (not /tmp which may be tmpfs
             # in vm_mode, hiding overlayfs writes from write_file).
             # QMP socket dir is on a volume, use its parent.
-            script_path = str(Path(self._qmp_path).parent / ".adl_qemu_launch.sh")
+            script_path = str(Path(self._qmp_path).parent / ".nbx_qemu_launch.sh")
             script = f"#!/bin/sh\nexec {cmd}\n"
             self._sb.write_file(script_path, script)
             self._sb.run(f"chmod +x {shlex.quote(script_path)}")
@@ -217,7 +217,7 @@ class QemuVM:
     #  VM interaction                                                      #
     # ------------------------------------------------------------------ #
 
-    def screenshot(self, path: str = "/tmp/.adl_screenshot.ppm") -> bytes:
+    def screenshot(self, path: str = "/tmp/.nbx_screenshot.ppm") -> bytes:
         """Take a screenshot of the VM display.
 
         Args:
@@ -349,19 +349,19 @@ class QemuVM:
         )
 
     def _install_qmp_helper(self) -> None:
-        """Copy the adl-qmp static binary into the sandbox.
+        """Copy the nbx-qmp static binary into the sandbox.
 
         Only needed when the Rust QMP binding is unavailable or the
         QMP socket is not host-accessible (e.g. on overlayfs).
         """
         vendor_dir = Path(__file__).parent / "_vendor"
-        helper_src = vendor_dir / "adl-qmp"
+        helper_src = vendor_dir / "nbx-qmp"
         if not helper_src.exists():
             raise FileNotFoundError(
-                f"adl-qmp binary not found at {helper_src}. "
+                f"nbx-qmp binary not found at {helper_src}. "
                 "Rebuild: gcc -static -nostdlib -Os -fno-builtin "
                 "-march=x86-64 -fno-stack-protector "
-                "-o adl-qmp adl-qmp.c && strip adl-qmp"
+                "-o nbx-qmp nbx-qmp.c && strip nbx-qmp"
             )
         self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
         self._sb.run(f"chmod +x {_QMP_HELPER}")
@@ -373,7 +373,7 @@ class QemuVM:
         """Send a QMP command.
 
         Tries the Rust native QMP client first (host-side, no subprocess
-        overhead).  Falls back to the adl-qmp static binary inside the
+        overhead).  Falls back to the nbx-qmp static binary inside the
         sandbox if the host-side socket is not reachable.
         """
         msg: dict[str, Any] = {"execute": command}
@@ -391,13 +391,13 @@ class QemuVM:
                 if host_sock.exists():
                     host_sock_str = str(host_sock)
             if host_sock_str and Path(host_sock_str).exists():
-                from agentdocker_lite._core import py_qmp_send
+                from nitrobox._core import py_qmp_send
                 output = py_qmp_send(host_sock_str, msg_json, timeout)
                 return json.loads(output)
         except (OSError, ImportError):
             pass  # fall through to sandbox-side helper
 
-        # Fallback: adl-qmp binary inside sandbox
+        # Fallback: nbx-qmp binary inside sandbox
         output, ec = self._sb.run(
             f"{_QMP_HELPER} "
             f"{shlex.quote(self._qmp_path)} "

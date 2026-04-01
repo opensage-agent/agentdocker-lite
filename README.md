@@ -1,8 +1,8 @@
-# agentdocker-lite
+# nitrobox
 
-[![Tests](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/agentdocker-lite/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
-[![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
+[![Tests](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml/badge.svg)](https://github.com/opensage-agent/nitrobox/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/nitrobox)](https://pypi.org/project/nitrobox/)
+[![Python](https://img.shields.io/pypi/pyversions/nitrobox)](https://pypi.org/project/nitrobox/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
@@ -14,7 +14,7 @@ Lightweight Linux namespace sandbox with persistent shell and instant filesystem
 Real-world example: [SWE-bench](https://www.swebench.com/) evaluation runs 2,294 task instances, each creating a Docker container, applying a patch, running tests, and destroying it. Here's how to migrate:
 
 <table>
-<tr><th>SWE-bench (Docker SDK)</th><th>agentdocker-lite</th></tr>
+<tr><th>SWE-bench (Docker SDK)</th><th>nitrobox</th></tr>
 <tr>
 <td>
 
@@ -39,7 +39,7 @@ for task in swebench_tasks:
 <td>
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 for task in swebench_tasks:
     # Create — ~25ms (13x faster)
@@ -73,7 +73,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
 - **Docker layer caching**: Shared base layers across images, skip pull when cached
 - **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces, Docker-matching health check daemon (`interval`, `start_period`, `start_interval`, `retries`)
-- **CLI**: `adl ps/kill/cleanup` for sandbox management
+- **CLI**: `nitrobox ps/kill/cleanup` for sandbox management
 
 ## Requirements
 
@@ -98,7 +98,7 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 ## Install
 
 ```bash
-pip install agentdocker-lite
+pip install nitrobox
 ```
 
 ### Development build
@@ -120,7 +120,7 @@ cargo run --bin stub_gen --release
 ## Quick start
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 config = SandboxConfig(
     image="ubuntu:22.04",
@@ -262,7 +262,7 @@ await asyncio.gather(*(rollout(i) for i in range(100)))
 Full process-state checkpoint/restore — memory, registers, fds, cwd. Requires root; CRIU binary is bundled.
 
 ```python
-from agentdocker_lite import CheckpointManager
+from nitrobox import CheckpointManager
 
 mgr = CheckpointManager(sb)
 sb.run("echo state_v1 > /workspace/data.txt")
@@ -277,7 +277,7 @@ output, _ = sb.run("cat /workspace/data.txt")
 
 ## Performance
 
-| | Docker | agentdocker-lite | Speedup |
+| | Docker | nitrobox | Speedup |
 |---|---|---|---|
 | Create | 320ms | 25ms | **13x** |
 | Per command | 17ms | 11ms | **1.6x** |
@@ -293,13 +293,13 @@ Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start
 
 **Auto-convert** — paste your existing Docker invocation directly:
 
-| Docker | agentdocker-lite |
+| Docker | nitrobox |
 |---|---|
 | `client.containers.run("img", cpus=0.5, ...)` | `SandboxConfig.from_docker("img", cpus=0.5, ...)` |
 | `docker run --cpus=0.5 -m 512m img` | `SandboxConfig.from_docker_run("docker run ...")` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 
-See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compose field support, and CLI reference (`adl ps/kill/cleanup`).
+See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compose field support, and CLI reference (`nitrobox ps/kill/cleanup`).
 
 ## Architecture
 
@@ -330,7 +330,7 @@ Host kernel (shared)
 
 ```bash
 python examples/basic_usage.py      # Full feature demo
-python examples/bench_swebench.py   # SWE-bench-style Docker vs adl comparison
+python examples/bench_swebench.py   # SWE-bench-style Docker vs nitrobox comparison
 python examples/benchmark.py        # Full performance comparison (all backends)
 ```
 

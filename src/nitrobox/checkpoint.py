@@ -1,4 +1,4 @@
-"""CRIU-based process checkpoint/restore for agentdocker-lite sandboxes.
+"""CRIU-based process checkpoint/restore for nitrobox sandboxes.
 
 Provides full process-state snapshots (memory, registers, file descriptors)
 on top of the existing overlayfs filesystem snapshots.  Zero runtime overhead —
@@ -14,8 +14,8 @@ Requirements:
     - ``protobuf`` Python package
 
 Usage:
-    >>> from agentdocker_lite import Sandbox, SandboxConfig
-    >>> from agentdocker_lite.checkpoint import CheckpointManager
+    >>> from nitrobox import Sandbox, SandboxConfig
+    >>> from nitrobox.checkpoint import CheckpointManager
     >>>
     >>> sb = Sandbox(SandboxConfig(image="ubuntu:22.04", working_dir="/workspace"))
     >>> mgr = CheckpointManager(sb)
@@ -45,10 +45,10 @@ from typing import Any
 
 # Protobuf-generated module with dynamic attributes — typed as Any to suppress
 # attribute access errors from type checkers.
-rpc: Any = __import__("agentdocker_lite._vendor.criu_rpc_pb2", fromlist=["criu_rpc_pb2"])
+rpc: Any = __import__("nitrobox._vendor.criu_rpc_pb2", fromlist=["criu_rpc_pb2"])
 
 if TYPE_CHECKING:
-    from agentdocker_lite.sandbox import Sandbox
+    from nitrobox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -410,7 +410,7 @@ class CheckpointManager:
                 base_rootfs = getattr(self._sandbox, "_base_rootfs", None)
                 lowerdir_spec = str(base_rootfs) if base_rootfs else None
             if lowerdir_spec:
-                from agentdocker_lite._core import py_mount_overlay
+                from nitrobox._core import py_mount_overlay
 
                 py_mount_overlay(
                     lowerdir_spec=str(lowerdir_spec),
@@ -616,7 +616,7 @@ class _RestoredProcess:
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
         self.pid = pid
         self._dead = False
-        from agentdocker_lite._core import py_pidfd_open
+        from nitrobox._core import py_pidfd_open
         self._pidfd: int | None = py_pidfd_open(pid)
         self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
         self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
@@ -635,7 +635,7 @@ class _RestoredProcess:
         except ChildProcessError:
             # Not our child (subreaper not set or race) — fallback to pidfd.
             if self._pidfd is not None:
-                from agentdocker_lite._core import py_pidfd_is_alive
+                from nitrobox._core import py_pidfd_is_alive
                 if not py_pidfd_is_alive(self._pidfd):
                     self._dead = True
                     return -1

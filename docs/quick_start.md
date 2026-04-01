@@ -8,7 +8,7 @@ pip install -e .
 
 Requirements: Linux kernel 5.11+, `util-linux` (`unshare`), Python 3.12+. No Docker or Podman required — images are pulled directly from registries via built-in OCI client.
 
-The pip package bundles static binaries for `pasta` (port mapping) and `criu` (process checkpointing) in `site-packages/agentdocker_lite/_vendor/`. No extra install needed.
+The pip package bundles static binaries for `pasta` (port mapping) and `criu` (process checkpointing) in `site-packages/nitrobox/_vendor/`. No extra install needed.
 
 ### Ubuntu 24.04 / 23.10+ (AppArmor)
 
@@ -27,7 +27,7 @@ No extra configuration needed.
 ## Basic usage
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 config = SandboxConfig(
     image="ubuntu:22.04",
@@ -139,7 +139,7 @@ Requires swap (zram or disk). Returns `False` if kernel doesn't support `process
 Multiple sandboxes can share a network namespace for direct communication while keeping filesystem isolation. Uses a Podman-style sentinel process with shared userns+netns.
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig, SharedNetwork
+from nitrobox import Sandbox, SandboxConfig, SharedNetwork
 
 # Create a shared network
 net = SharedNetwork("my-net")
@@ -236,7 +236,7 @@ Full process-state checkpoint/restore: memory, registers, environment variables,
 **Requirements**: root (CRIU binary is bundled — no install needed).
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
 config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
 sb = Sandbox(config, name="worker-0")
@@ -335,8 +335,8 @@ config = SandboxConfig(
 Run QEMU/KVM VMs inside sandboxes for GUI agent training (e.g., OSWorld). `QemuVM` manages the QEMU process and provides QMP-based `savevm`/`loadvm` for fast episode reset (1-5s vs 30-120s cold restart).
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
-from agentdocker_lite.vm import QemuVM
+from nitrobox import Sandbox, SandboxConfig
+from nitrobox.vm import QemuVM
 
 sb = Sandbox(SandboxConfig(
     image="ubuntu:22.04",   # needs qemu-system-x86 installed
@@ -410,11 +410,11 @@ for sb in sandboxes:
 ## CLI
 
 ```bash
-adl ps                  # list running sandboxes
-adl kill <name>         # kill a sandbox and clean up
-adl kill --all          # kill all sandboxes
-adl cleanup             # remove stale sandbox directories
-adl --dir /path ps      # use custom sandbox base directory
+nitrobox ps                  # list running sandboxes
+nitrobox kill <name>         # kill a sandbox and clean up
+nitrobox kill --all          # kill all sandboxes
+nitrobox cleanup             # remove stale sandbox directories
+nitrobox --dir /path ps      # use custom sandbox base directory
 ```
 
 ## Crash recovery
@@ -422,11 +422,11 @@ adl --dir /path ps      # use custom sandbox base directory
 Sandboxes auto-cleanup on process exit via `atexit`. For `kill -9` scenarios:
 
 ```bash
-adl cleanup             # or from Python:
+nitrobox cleanup             # or from Python:
 ```
 
 ```python
-from agentdocker_lite import Sandbox
+from nitrobox import Sandbox
 Sandbox.cleanup_stale()
 ```
 
@@ -446,7 +446,7 @@ print(sb.features)
 
 ### Single-operation latency
 
-| | Docker | agentdocker-lite | Speedup |
+| | Docker | nitrobox | Speedup |
 |---|---|---|---|
 | Create | 286ms | 18ms | **16x** |
 | Per command | 17ms | 11ms | **1.7x** |
@@ -457,7 +457,7 @@ print(sb.features)
 
 ### Sustained workloads
 
-| | Docker | agentdocker-lite | Speedup |
+| | Docker | nitrobox | Speedup |
 |---|---|---|---|
 | Throughput (1000 cmds) | 57 cmd/s | 95 cmd/s | **1.7x** |
 | Reset loop (100 cycles) | 2.0/s | 34.7/s | **17.6x** |
@@ -474,7 +474,7 @@ python examples/benchmark.py
 
 ## Docker migration cheatsheet
 
-| Docker | agentdocker-lite |
+| Docker | nitrobox |
 |---|---|
 | `docker run -d ubuntu:22.04` | `sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))` |
 | `docker exec <id> echo hello` | `sb.run("echo hello")` |
@@ -522,14 +522,14 @@ Instead of manually translating parameters, paste your existing Docker invocatio
 Accepts the same keyword arguments as `docker.containers.run()`:
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 # Before (Docker SDK):
 # c = client.containers.run("python:3.11", cpus=0.5, mem_limit="512m",
 #     volumes={"/data": {"bind": "/data", "mode": "ro"}},
 #     ports={"80/tcp": 8080}, hostname="worker", detach=True)
 
-# After (agentdocker-lite) — same kwargs:
+# After (nitrobox) — same kwargs:
 sb = Sandbox(SandboxConfig.from_docker(
     "python:3.11",
     cpus=0.5,
@@ -561,10 +561,10 @@ Handles `sudo docker run`, combined flags (`-dit`), `--key=value` and `--key val
 
 ## Docker Compose compatibility
 
-Run multi-service `docker-compose.yml` files as agentdocker-lite sandboxes. Each service becomes an independent sandbox with filesystem-level `reset()` — no application-specific reset endpoints needed.
+Run multi-service `docker-compose.yml` files as nitrobox sandboxes. Each service becomes an independent sandbox with filesystem-level `reset()` — no application-specific reset endpoints needed.
 
 ```python
-from agentdocker_lite import ComposeProject
+from nitrobox import ComposeProject
 
 # Start all services (dependency order, health checks)
 proj = ComposeProject("docker-compose.yml", env={"API_PORT": "8030"})

@@ -142,7 +142,7 @@ def _parse_io_max(value: str) -> str:
 
 def _convert_cpu_shares(shares: int) -> int:
     """Convert Docker ``--cpu-shares`` to cgroup v2 ``cpu.weight``."""
-    from agentdocker_lite._core import py_convert_cpu_shares
+    from nitrobox._core import py_convert_cpu_shares
     return int(py_convert_cpu_shares(shares))
 
 
@@ -219,8 +219,8 @@ class SandboxConfig:
         fs_backend: Filesystem backend: ``"overlayfs"`` (default) or ``"btrfs"``.
         env_base_dir: Base directory for per-sandbox state.
         rootfs_cache_dir: Directory to cache auto-prepared rootfs images.
-            Defaults to ``$XDG_CACHE_HOME/agentdocker_lite/rootfs``
-            (typically ``~/.cache/agentdocker_lite/rootfs``).
+            Defaults to ``$XDG_CACHE_HOME/nitrobox/rootfs``
+            (typically ``~/.cache/nitrobox/rootfs``).
         cpu_max: CPU limit.  Accepts a fraction of cores (``"0.5"`` = half
             a core, ``"2"`` = two cores), a percentage (``"50%"``), or the
             raw cgroup v2 ``cpu.max`` format (``"50000 100000"``).
@@ -310,10 +310,10 @@ class SandboxConfig:
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:
-            self.env_base_dir = f"/tmp/agentdocker_lite_{os.getuid()}"
+            self.env_base_dir = f"/tmp/nitrobox_{os.getuid()}"
         if not self.rootfs_cache_dir:
             cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-            self.rootfs_cache_dir = os.path.join(cache_home, "agentdocker_lite", "rootfs")
+            self.rootfs_cache_dir = os.path.join(cache_home, "nitrobox", "rootfs")
         # Parse human-readable resource limits.
         if self.memory_max:
             self.memory_max = _parse_size(self.memory_max)
@@ -356,7 +356,7 @@ class SandboxConfig:
             client.containers.run("python:3.11", cpus=0.5,
                 mem_limit="512m", ports={"80/tcp": 8080})
 
-            # After (agentdocker-lite):
+            # After (nitrobox):
             cfg = SandboxConfig.from_docker("python:3.11", cpus=0.5,
                 mem_limit="512m", ports={"80/tcp": 8080})
             sb = Sandbox(cfg)

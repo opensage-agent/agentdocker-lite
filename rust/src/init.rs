@@ -1118,7 +1118,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
     let mut env_vec: Vec<CString> = config.env.iter()
         .map(|(k, v)| c(&format!("{}={}", k, v)))
         .collect();
-    env_vec.push(c(&format!("_ADL_SIGNAL_FD={}", signal_w)));
+    env_vec.push(c(&format!("_NITROBOX_SIGNAL_FD={}", signal_w)));
 
     // Working directory
     rustix::process::chdir(&*config.working_dir).ok();

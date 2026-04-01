@@ -1,4 +1,4 @@
-"""Tests for the adl CLI."""
+"""Tests for the nitrobox CLI."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -25,7 +25,7 @@ def _requires_docker():
 
 def _adl(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["python", "-m", "agentdocker_lite.cli", *args],
+        ["python", "-m", "nitrobox.cli", *args],
         capture_output=True, text=True, timeout=10,
     )
 
@@ -126,7 +126,7 @@ class TestCli:
         proc = subprocess.Popen(
             [
                 "python", "-c",
-                f"from agentdocker_lite import Sandbox, SandboxConfig; "
+                f"from nitrobox import Sandbox, SandboxConfig; "
                 f"import time; "
                 f"sb = Sandbox(SandboxConfig(image='{TEST_IMAGE}', "
                 f"env_base_dir='{env_dir}', "
@@ -143,7 +143,7 @@ class TestCli:
             result = _adl("--dir", env_dir, "ps")
             assert "cli-kill-test" in result.stdout
 
-            # adl kill targets the shell process, not the owner
+            # nitrobox kill targets the shell process, not the owner
             result = _adl("--dir", env_dir, "kill", "cli-kill-test")
             assert result.returncode == 0
             assert "killed" in result.stdout
@@ -163,7 +163,7 @@ class TestCli:
                 proc.wait()
 
     def test_kill_from_owner_process(self, tmp_path, shared_cache_dir):
-        """adl kill from the sandbox owner process should not kill itself."""
+        """nitrobox kill from the sandbox owner process should not kill itself."""
         _skip_if_root()
         _requires_docker()
         env_dir = str(tmp_path / "envs")
@@ -177,7 +177,7 @@ class TestCli:
         result = _adl("--dir", env_dir, "ps")
         assert "kill-self-test" in result.stdout
 
-        # adl kill should kill the shell, not us
+        # nitrobox kill should kill the shell, not us
         result = _adl("--dir", env_dir, "kill", "kill-self-test")
         assert result.returncode == 0
 

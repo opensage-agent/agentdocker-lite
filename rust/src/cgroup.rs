@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const CGROUP_BASE: &str = "/sys/fs/cgroup/agentdocker_lite";
+const CGROUP_BASE: &str = "/sys/fs/cgroup/nitrobox";
 
 /// Check if cgroup v2 is available on this system.
 pub fn cgroup_v2_available() -> bool {

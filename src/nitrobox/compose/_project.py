@@ -1,8 +1,8 @@
-"""ComposeProject: manage a docker-compose.yml as a set of agentdocker-lite sandboxes.
+"""ComposeProject: manage a docker-compose.yml as a set of nitrobox sandboxes.
 
 Usage::
 
-    from agentdocker_lite import ComposeProject
+    from nitrobox import ComposeProject
 
     proj = ComposeProject("docker-compose.yml", env={"API_PORT": "8030"})
     proj.up()
@@ -24,10 +24,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from agentdocker_lite.config import SandboxConfig
-from agentdocker_lite.sandbox import Sandbox
-from agentdocker_lite.compose._parse import _Service, _parse_compose, _topo_sort
-from agentdocker_lite.compose._network import SharedNetwork, _parse_duration, _healthcheck_cmd
+from nitrobox.config import SandboxConfig
+from nitrobox.sandbox import Sandbox
+from nitrobox.compose._parse import _Service, _parse_compose, _topo_sort
+from nitrobox.compose._network import SharedNetwork, _parse_duration, _healthcheck_cmd
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class _HealthMonitor:
 
 
 class ComposeProject:
-    """Manage a ``docker-compose.yml`` as a set of agentdocker-lite sandboxes.
+    """Manage a ``docker-compose.yml`` as a set of nitrobox sandboxes.
 
     Each service becomes an independent :class:`Sandbox` instance.
     Services using ``network_mode: host`` get ``net_isolate=False``
@@ -179,7 +179,7 @@ class ComposeProject:
             raise RuntimeError("Project already running. Call down() first.")
 
         # Create volume directories for named volumes
-        base = self._env_base_dir or f"/tmp/agentdocker_lite_{os.getuid()}"
+        base = self._env_base_dir or f"/tmp/nitrobox_{os.getuid()}"
         self._volume_dir = Path(base) / f"{self._project_name}_volumes"
         self._volume_dir.mkdir(parents=True, exist_ok=True)
 
@@ -224,7 +224,7 @@ class ComposeProject:
         ``"healthy"``, ``"unhealthy"``, ``"starting"``, or
         ``"none"`` (no health check configured).
 
-        This is the ADL equivalent of reading ``docker compose ps``
+        This is the NitroBox equivalent of reading ``docker compose ps``
         health column.
         """
         result: dict[str, str] = {}
@@ -456,7 +456,7 @@ class ComposeProject:
         image = self._resolve_image(svc)
 
         # Fetch image config for entrypoint+CMD (used by _cmd_string)
-        from agentdocker_lite.rootfs import get_image_config
+        from nitrobox.rootfs import get_image_config
         img_cfg = get_image_config(image) or {}
         self._image_cmds[svc.name] = img_cfg.get("cmd")
         self._image_entrypoints[svc.name] = img_cfg.get("entrypoint")
@@ -522,7 +522,7 @@ class ComposeProject:
         # cap_add: merge explicit cap_add with privileged (all caps)
         caps = list(svc.cap_add) if svc.cap_add else []
         if svc.privileged:
-            from agentdocker_lite.config import CAP_NAME_TO_NUM
+            from nitrobox.config import CAP_NAME_TO_NUM
             caps = list(CAP_NAME_TO_NUM.keys())
         if caps:
             config_kwargs["cap_add"] = caps

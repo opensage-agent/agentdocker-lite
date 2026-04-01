@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "adl-core"
+name = "nitrobox-core"
 version = "0.0.5"
 dependencies = [
  "env_logger",

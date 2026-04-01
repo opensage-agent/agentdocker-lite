@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "agentdocker-lite"
+name = "nitrobox"
 version = "0.0.5"
 description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
 requires-python = ">=3.12"
@@ -33,21 +33,22 @@ authors = [{ name = "Yuzhou Nie" }]
 dependencies = ["protobuf>=4.0", "pyyaml>=6.0"]
 
 [project.urls]
-Homepage = "https://github.com/opensage-agent/agentdocker-lite"
-Repository = "https://github.com/opensage-agent/agentdocker-lite"
-"Bug Tracker" = "https://github.com/opensage-agent/agentdocker-lite/issues"
-Changelog = "https://github.com/opensage-agent/agentdocker-lite/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/opensage-agent/nitrobox"
+Repository = "https://github.com/opensage-agent/nitrobox"
+"Bug Tracker" = "https://github.com/opensage-agent/nitrobox/issues"
+Changelog = "https://github.com/opensage-agent/nitrobox/blob/main/CHANGELOG.md"
 
 [project.scripts]
-adl = "agentdocker_lite.cli:main"
+nitrobox = "nitrobox.cli:main"
+nbx = "nitrobox.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=9.0"]
 
 [tool.maturin]
 python-source = "src"
-module-name = "agentdocker_lite._core"
+module-name = "nitrobox._core"
 features = ["pyo3/extension-module"]
 include = [
-    { path = "src/agentdocker_lite/_vendor/**", format = "sdist" },
+    { path = "src/nitrobox/_vendor/**", format = "sdist" },
 ]

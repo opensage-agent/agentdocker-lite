@@ -1,4 +1,4 @@
-"""Tests for agentdocker-lite.
+"""Tests for nitrobox.
 
 These tests require root and Docker (for auto rootfs preparation).
 Run with: sudo python -m pytest tests/ -v
@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 
 # Use a pre-existing rootfs if available, otherwise fall back to Docker image.
 # Set LITE_SANDBOX_TEST_IMAGE env var to override.
@@ -514,7 +514,7 @@ class TestFsSnapshot:
 class TestSaveAsImage:
     """Test save_as_image: export sandbox state as a Docker image."""
 
-    IMAGE_TAG = "adl-test-save:cached"
+    IMAGE_TAG = "nbx-test-save:cached"
 
     def test_save_and_load(self, sandbox):
         sandbox.run("echo cached_data > /workspace/cached.txt")
@@ -849,7 +849,7 @@ class TestEdgeCases:
         sb = Sandbox(config, name="dead-sandbox")
         sb.delete()
         # rootfs is gone, so run() should raise (shell can't restart)
-        from agentdocker_lite._errors import SandboxError
+        from nitrobox._errors import SandboxError
         with pytest.raises((RuntimeError, OSError, SandboxError)):
             sb.run("echo hello")
 
@@ -884,7 +884,7 @@ class TestMountOverlay:
     def test_single_layer(self, tmp_path):
         """mount_overlay works with a single lowerdir."""
         _requires_root()
-        from agentdocker_lite._core import py_mount_overlay as mount_overlay
+        from nitrobox._core import py_mount_overlay as mount_overlay
 
         lower = tmp_path / "lower"
         lower.mkdir()
@@ -903,7 +903,7 @@ class TestMountOverlay:
     def test_multi_layer(self, tmp_path):
         """mount_overlay works with multiple lowerdirs (bypasses 256-byte limit)."""
         _requires_root()
-        from agentdocker_lite._core import py_mount_overlay as mount_overlay
+        from nitrobox._core import py_mount_overlay as mount_overlay
 
         # Create 6 layers — this exceeds the 256-byte fsconfig limit
         layers = []
@@ -934,7 +934,7 @@ class TestMountOverlay:
     def test_new_api_detection(self):
         """_check_new_mount_api returns a boolean (True on kernel >= 6.8)."""
         _requires_root()
-        from agentdocker_lite._core import py_check_new_mount_api as _check_new_mount_api
+        from nitrobox._core import py_check_new_mount_api as _check_new_mount_api
 
         result = _check_new_mount_api()
         assert isinstance(result, bool)
@@ -1398,23 +1398,23 @@ class TestParseCpuMax:
     """Unit tests for _parse_cpu_max sugar."""
 
     def test_fraction(self):
-        from agentdocker_lite.config import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("0.5") == "50000 100000"
 
     def test_integer_cores(self):
-        from agentdocker_lite.config import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("2") == "200000 100000"
 
     def test_percentage(self):
-        from agentdocker_lite.config import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("50%") == "50000 100000"
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.config import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         assert _parse_cpu_max("50000 100000") == "50000 100000"
 
     def test_small_fraction(self):
-        from agentdocker_lite.config import _parse_cpu_max
+        from nitrobox.config import _parse_cpu_max
         result = _parse_cpu_max("0.01")
         quota, period = result.split()
         assert int(quota) >= 1
@@ -1430,24 +1430,24 @@ class TestParseIoMax:
     """Unit tests for _parse_io_max sugar."""
 
     def test_bare_size(self):
-        from agentdocker_lite.config import _parse_io_max
+        from nitrobox.config import _parse_io_max
         # /dev/xxx won't resolve on CI, but MAJ:MIN passthrough works
         result = _parse_io_max("259:0 10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_keyed_size(self):
-        from agentdocker_lite.config import _parse_io_max
+        from nitrobox.config import _parse_io_max
         result = _parse_io_max("259:0 wbps=10mb")
         assert result == "259:0 wbps=10485760"
 
     def test_multiple_params(self):
-        from agentdocker_lite.config import _parse_io_max
+        from nitrobox.config import _parse_io_max
         result = _parse_io_max("259:0 rbps=5mb wbps=10mb")
         assert "rbps=5242880" in result
         assert "wbps=10485760" in result
 
     def test_passthrough_raw(self):
-        from agentdocker_lite.config import _parse_io_max
+        from nitrobox.config import _parse_io_max
         raw = "259:0 wbps=10485760"
         assert _parse_io_max(raw) == raw
 
@@ -1461,16 +1461,16 @@ class TestCpuShares:
     """Unit tests for _convert_cpu_shares."""
 
     def test_default_1024(self):
-        from agentdocker_lite.config import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         # Docker 1024 → cgroup v2 weight ~39 (formula: 1 + (1022*9999)/262142)
         assert 1 <= _convert_cpu_shares(1024) <= 10000
 
     def test_minimum(self):
-        from agentdocker_lite.config import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         assert _convert_cpu_shares(2) >= 1
 
     def test_maximum(self):
-        from agentdocker_lite.config import _convert_cpu_shares
+        from nitrobox.config import _convert_cpu_shares
         assert _convert_cpu_shares(262144) == 10000
 
     def test_from_docker(self):
@@ -1602,9 +1602,9 @@ class TestApplyImageDefaults:
     """Unit tests for _apply_image_defaults (image config backfill)."""
 
     def test_backfill_workdir(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
                           "entrypoint": None, "exposed_ports": []},
         )
@@ -1613,9 +1613,9 @@ class TestApplyImageDefaults:
         assert cfg.working_dir == "/app"
 
     def test_user_workdir_wins(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
                           "entrypoint": None, "exposed_ports": []},
         )
@@ -1624,9 +1624,9 @@ class TestApplyImageDefaults:
         assert cfg.working_dir == "/custom"
 
     def test_backfill_env(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: {"working_dir": None, "env": {"A": "1", "B": "2"},
                           "cmd": None, "entrypoint": None, "exposed_ports": []},
         )
@@ -1636,9 +1636,9 @@ class TestApplyImageDefaults:
         assert cfg.environment["B"] == "override"
 
     def test_no_image_config(self, monkeypatch):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         monkeypatch.setattr(
-            "agentdocker_lite.rootfs.get_image_config",
+            "nitrobox.rootfs.get_image_config",
             lambda _img: None,
         )
         cfg = SandboxConfig(image="myimg")
@@ -1647,7 +1647,7 @@ class TestApplyImageDefaults:
         assert cfg.environment == {}
 
     def test_no_image(self):
-        from agentdocker_lite.sandbox import _apply_image_defaults
+        from nitrobox.sandbox import _apply_image_defaults
         cfg = SandboxConfig()
         _apply_image_defaults(cfg)
         assert cfg.working_dir == "/"
@@ -1856,7 +1856,7 @@ class TestGetImageConfig:
     def test_basic(self):
         """get_image_config returns cmd, entrypoint, env, working_dir."""
         _requires_docker()
-        from agentdocker_lite import get_image_config
+        from nitrobox import get_image_config
         cfg = get_image_config("python:3.11-slim")
         assert cfg is not None
         assert cfg["cmd"] == ["python3"]
@@ -1865,7 +1865,7 @@ class TestGetImageConfig:
 
     def test_nonexistent_image(self):
         """get_image_config returns None for missing image."""
-        from agentdocker_lite import get_image_config
+        from nitrobox import get_image_config
         assert get_image_config("nonexistent:image-xyz") is None
 
 
@@ -1902,7 +1902,7 @@ class TestDeleteCleansBackground:
 class TestRegistry:
     def test_parse_image_ref(self):
         """parse_image_ref correctly splits registry/repo/tag."""
-        from agentdocker_lite._registry import parse_image_ref
+        from nitrobox._registry import parse_image_ref
 
         assert parse_image_ref("ubuntu:22.04") == (
             "registry-1.docker.io", "library/ubuntu", "22.04")
@@ -1915,7 +1915,7 @@ class TestRegistry:
 
     def test_get_diff_ids_from_registry(self):
         """Can get layer diff_ids directly from Docker Hub."""
-        from agentdocker_lite._registry import get_diff_ids_from_registry
+        from nitrobox._registry import get_diff_ids_from_registry
 
         ids = get_diff_ids_from_registry("ubuntu:22.04")
         assert ids is not None
@@ -1924,7 +1924,7 @@ class TestRegistry:
 
     def test_get_config_from_registry(self):
         """Can get image config directly from Docker Hub."""
-        from agentdocker_lite._registry import get_config_from_registry
+        from nitrobox._registry import get_config_from_registry
 
         cfg = get_config_from_registry("python:3.11-slim")
         assert cfg is not None
@@ -1932,7 +1932,7 @@ class TestRegistry:
 
     def test_registry_fallback_layers(self, tmp_path):
         """Layer extraction works via registry when Docker/Podman unavailable."""
-        import agentdocker_lite.rootfs as rf
+        import nitrobox.rootfs as rf
 
         orig = rf._container_cli
         rf._container_cli = lambda: None  # Force registry path

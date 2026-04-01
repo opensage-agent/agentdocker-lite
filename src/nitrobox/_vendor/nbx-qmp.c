@@ -1,14 +1,14 @@
 /*
- * Minimal QMP (QEMU Monitor Protocol) client for agentdocker-lite.
+ * Minimal QMP (QEMU Monitor Protocol) client for nitrobox.
  * Zero libc dependency — raw syscalls only. ~5KB stripped.
  *
- * Usage: adl-qmp /path/to/qmp.sock '{"execute":"query-status"}'
+ * Usage: nbx-qmp /path/to/qmp.sock '{"execute":"query-status"}'
  *
  * Connects to QMP Unix socket, negotiates capabilities, sends
  * the command, prints the JSON response line, and exits.
  *
  * Build: gcc -static -nostdlib -Os -march=x86-64 -fno-stack-protector \
- *            -o adl-qmp adl-qmp.c && strip adl-qmp
+ *            -o nbx-qmp nbx-qmp.c && strip nbx-qmp
  */
 
 /* ---- Raw syscall wrappers (x86_64) ---- */
@@ -78,7 +78,7 @@ static int has_key(const char *json, const char *key) {
 __attribute__((used))
 static void _main(long argc, char **argv) {
     if (argc < 3) {
-        writes(2, "usage: adl-qmp SOCKET_PATH '{\"execute\":\"CMD\"}'\n");
+        writes(2, "usage: nbx-qmp SOCKET_PATH '{\"execute\":\"CMD\"}'\n");
         sc1(NR_exit, 1);
     }
 
@@ -88,7 +88,7 @@ static void _main(long argc, char **argv) {
     /* 1. Create Unix socket */
     int fd = sc3(NR_socket, AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
-        writes(2, "adl-qmp: socket failed\n");
+        writes(2, "nbx-qmp: socket failed\n");
         sc1(NR_exit, 1);
     }
 
@@ -96,11 +96,11 @@ static void _main(long argc, char **argv) {
     struct sockaddr_un addr;
     addr.sun_family = AF_UNIX;
     int plen = slen(sock_path);
-    if (plen >= 108) { writes(2, "adl-qmp: path too long\n"); sc1(NR_exit, 1); }
+    if (plen >= 108) { writes(2, "nbx-qmp: path too long\n"); sc1(NR_exit, 1); }
     for (int i = 0; i <= plen; i++) addr.sun_path[i] = sock_path[i];
 
     if (sc3(NR_connect, fd, (long)&addr, 2 + plen + 1) < 0) {
-        writes(2, "adl-qmp: connect failed\n");
+        writes(2, "nbx-qmp: connect failed\n");
         sc1(NR_exit, 1);
     }
 

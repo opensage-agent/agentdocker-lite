@@ -1,6 +1,6 @@
 # Userns Mode Fixes for SkyRL/Harbor Integration
 
-Summary of all fixes required to make agentdocker-lite work as a drop-in replacement for Docker in the SkyRL + Harbor RL training pipeline (rootless/userns mode).
+Summary of all fixes required to make nitrobox work as a drop-in replacement for Docker in the SkyRL + Harbor RL training pipeline (rootless/userns mode).
 
 ## Test Result
 
@@ -13,7 +13,7 @@ Generating Trajectories: 100%|██████████| 1/1 [00:49<00:00, 
 
 ## Fix 1: Full UID Mapping (`newuidmap`/`newgidmap`)
 
-**Problem:** When agentdocker-lite runs in rootless (user namespace) mode, `--map-root-user` only maps a single UID:
+**Problem:** When nitrobox runs in rootless (user namespace) mode, `--map-root-user` only maps a single UID:
 
 ```
 sandbox uid 0 (root)  →  host uid (e.g. 243001009 / jingyang)
@@ -106,7 +106,7 @@ grep $(whoami) /etc/subuid
 
 # Quick test
 python3 -c "
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 sb = Sandbox(SandboxConfig(image='ubuntu:22.04'), 'test')
 out, _ = sb.run('cat /proc/self/uid_map')
 print(out)
@@ -162,7 +162,7 @@ chmod 1777 ${merged}/tmp 2>/dev/null || true
 
 **Problem:** `apt-get update` reports `gpgv not installed` even though `/usr/bin/gpgv` exists and works. tmux fails with `create window failed: fork failed: No such file or directory`.
 
-**Root cause:** The Rust init chain (security primitives, formerly `adl-seccomp`) re-mounts `/dev` as an empty tmpfs, then creates device nodes via `mknod`. In userns mode, `mknod` silently fails (requires real root). This leaves `/dev/null`, `/dev/zero`, etc. missing. Consequences:
+**Root cause:** The Rust init chain (security primitives, formerly `nbx-seccomp`) re-mounts `/dev` as an empty tmpfs, then creates device nodes via `mknod`. In userns mode, `mknod` silently fails (requires real root). This leaves `/dev/null`, `/dev/zero`, etc. missing. Consequences:
 - `apt-key`: `cannot create /dev/null: Permission denied` → gpgv verification fails
 - `tmux`: no `/dev/pts` (devpts not mounted) → PTY allocation fails
 
@@ -170,7 +170,7 @@ The setup script had already correctly set up `/dev` (bind-mounting from host) a
 
 **Fix (original):** Skip the Rust init chain in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts.
 
-**Fix (current):** The Rust init chain now supports a `/tmp/.adl_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
+**Fix (current):** The Rust init chain now supports a `/tmp/.nbx_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
 
 Additionally, mount `devpts` in the setup script (previously only done by the Rust init chain):
 ```bash
@@ -180,40 +180,40 @@ ln -sf pts/ptmx ${merged}/dev/ptmx
 
 **File changed:** `sandbox.py` (`_generate_userns_setup_script`)
 
-**DONE:** seccomp BPF, capability drop, masked paths, and read-only paths are now all active in rootless mode via the `adl_skip_dev` mechanism.
+**DONE:** seccomp BPF, capability drop, masked paths, and read-only paths are now all active in rootless mode via the `nbx_skip_dev` mechanism.
 
 ## Fix 5: `ExecResult.stderr` Must Be String (SkyRL side)
 
 **Problem:** Harbor's terminus-2 agent crashes with `AttributeError: 'NoneType' object has no attribute 'strip'` on `set_history_result.stderr.strip()`.
 
-**Root cause:** agentdocker-lite merges stderr into stdout. The environment provider returned `stderr=None` in `ExecResult`, but Harbor expects a string.
+**Root cause:** nitrobox merges stderr into stdout. The environment provider returned `stderr=None` in `ExecResult`, but Harbor expects a string.
 
 **Fix:** Return `stderr=""` instead of `stderr=None`.
 
-**File changed:** `agentdocker_lite_environment.py` (SkyRL side)
+**File changed:** `nitrobox_environment.py` (SkyRL side)
 
 ## All Files Changed
 
-### agentdocker-lite
+### nitrobox
 
 | File | Changes |
 |---|---|
-| `src/agentdocker_lite/_shell.py` | `subuid_range` param, pipe sync, `newuidmap`/`newgidmap` |
-| `src/agentdocker_lite/sandbox.py` | `_detect_subuid_range()`, DNS propagation, `/tmp` chmod, devpts mount, skip Rust init chain `/dev` setup in userns |
+| `src/nitrobox/_shell.py` | `subuid_range` param, pipe sync, `newuidmap`/`newgidmap` |
+| `src/nitrobox/sandbox.py` | `_detect_subuid_range()`, DNS propagation, `/tmp` chmod, devpts mount, skip Rust init chain `/dev` setup in userns |
 
 ### SkyRL
 
 | File | Changes |
 |---|---|
-| `examples/.../agentdocker_lite_environment.py` | Use `Sandbox()` factory (not `NamespaceSandbox`), remove `use_sudo`, `stderr=""` |
-| `examples/.../run_harbor_gen_agentdocker.sh` | `NUM_GPUS` from env var with default |
+| `examples/.../nitrobox_environment.py` | Use `Sandbox()` factory (not `NamespaceSandbox`), remove `use_sudo`, `stderr=""` |
+| `examples/.../run_harbor_gen_nitrobox.sh` | `NUM_GPUS` from env var with default |
 
 ## Debugging Notes
 
 Useful commands for debugging sandbox issues:
 
 ```python
-from agentdocker_lite import Sandbox, SandboxConfig
+from nitrobox import Sandbox, SandboxConfig
 config = SandboxConfig(image='<rootfs_path>', working_dir='/app')
 sb = Sandbox(config, 'debug')
 
@@ -240,7 +240,7 @@ sb.run('tmux list-sessions')
 sb.delete()
 ```
 
-To force SkyRL to pick up agentdocker-lite changes:
+To force SkyRL to pick up nitrobox changes:
 ```bash
-uv cache clean agentdocker-lite --force
+uv cache clean nitrobox --force
 ```

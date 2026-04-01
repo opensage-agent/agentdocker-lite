@@ -1,13 +1,13 @@
-"""Minimal CLI for agentdocker-lite sandbox management.
+"""Minimal CLI for nitrobox sandbox management.
 
 Thin wrapper over Rust _core functions.
 
 Usage::
 
-    adl ps                  # list sandboxes
-    adl cleanup             # remove stale sandboxes
-    adl kill <name>         # kill a sandbox by name
-    adl kill --all          # kill all sandboxes
+    nitrobox ps                  # list sandboxes
+    nitrobox cleanup             # remove stale sandboxes
+    nitrobox kill <name>         # kill a sandbox by name
+    nitrobox kill --all          # kill all sandboxes
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _env_base_dir(args: argparse.Namespace) -> Path:
     if hasattr(args, "dir") and args.dir:
         return Path(args.dir)
     return Path(
-        os.environ.get("ADL_ENV_BASE_DIR", f"/tmp/agentdocker_lite_{os.getuid()}")
+        os.environ.get("NITROBOX_ENV_BASE_DIR", f"/tmp/nitrobox_{os.getuid()}")
     )
 
 
@@ -80,7 +80,7 @@ def cmd_ps(args: argparse.Namespace) -> None:
 
 
 def cmd_cleanup(args: argparse.Namespace) -> None:
-    from agentdocker_lite.sandbox import Sandbox
+    from nitrobox.sandbox import Sandbox
     cleaned = Sandbox.cleanup_stale(str(_env_base_dir(args)))
     if cleaned:
         print(f"Cleaned up {cleaned} stale sandbox(es).")
@@ -134,18 +134,18 @@ def cmd_kill(args: argparse.Namespace) -> None:
             pass
     time.sleep(0.1)
 
-    from agentdocker_lite.sandbox import Sandbox
+    from nitrobox.sandbox import Sandbox
     Sandbox.cleanup_stale(str(base))
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="adl",
-        description="agentdocker-lite sandbox manager",
+        prog="nitrobox",
+        description="nitrobox sandbox manager",
     )
     parser.add_argument(
         "--dir", metavar="PATH",
-        help="sandbox base directory (default: /tmp/agentdocker_lite_$UID)",
+        help="sandbox base directory (default: /tmp/nitrobox_$UID)",
     )
     sub = parser.add_subparsers(dest="command")
 

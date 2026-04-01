@@ -1,8 +1,8 @@
-"""Structured error types for agentdocker-lite."""
+"""Structured error types for nitrobox."""
 
 
 class SandboxError(Exception):
-    """Base exception for all agentdocker-lite errors."""
+    """Base exception for all nitrobox errors."""
 
 
 class SandboxInitError(SandboxError):

@@ -2,7 +2,7 @@
 //!
 //! Connects to a QEMU QMP Unix socket, negotiates capabilities,
 //! sends a JSON command, and returns the response.  Replaces the
-//! `adl-qmp.c` static binary with a native Rust implementation
+//! `nbx-qmp.c` static binary with a native Rust implementation
 //! callable directly from Python via PyO3.
 
 use std::io::{self, BufRead, BufReader, Write};

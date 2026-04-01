@@ -1,4 +1,4 @@
-"""Shared fixtures for agentdocker-lite tests."""
+"""Shared fixtures for nitrobox tests."""
 
 from __future__ import annotations
 
