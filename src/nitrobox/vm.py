@@ -359,9 +359,9 @@ class QemuVM:
         if not helper_src.exists():
             raise FileNotFoundError(
                 f"nbx-qmp binary not found at {helper_src}. "
-                "Rebuild: gcc -static -nostdlib -Os -fno-builtin "
-                "-march=x86-64 -fno-stack-protector "
-                "-o nbx-qmp nbx-qmp.c && strip nbx-qmp"
+                "Rebuild: rustc --edition 2024 -C opt-level=z -C panic=abort "
+                "-C link-arg=-nostdlib -C link-arg=-static -C strip=symbols "
+                "-o nbx-qmp rust/src/bin/nbx_qmp.rs"
             )
         self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
         self._sb.run(f"chmod +x {_QMP_HELPER}")
