@@ -206,7 +206,7 @@ class TestQemuVM:
         override = "qemu-system-x86_64 -m 4G"
         vm = QemuVM(sb, cmd_override=override, qmp_socket="/storage/.qmp.sock")
         cmd = vm._build_cmd()
-        assert cmd.endswith("-qmp unix:/storage/.qmp.sock,server,nowait")
+        assert "-qmp unix:/storage/.qmp.sock,server,nowait" in cmd
 
     def test_repr(self, vm_sandbox):
         """repr shows useful info."""

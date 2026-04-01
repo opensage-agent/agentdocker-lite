@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _QMP_SOCKET = "/tmp/.nbx_qmp.sock"
+_QMP_HELPER = "/tmp/.nbx_qmp"  # static binary copied into sandbox
 _QGA_SOCKET = "/tmp/.nbx_qga.sock"
 
 
@@ -134,6 +135,7 @@ class QemuVM:
             TimeoutError: QMP socket not ready within *timeout*.
             FileNotFoundError: ``qemu-system-x86_64`` not found.
         """
+        self._install_qmp_helper()
         cmd = self._build_cmd()
 
         if self._cmd_override:
@@ -376,33 +378,94 @@ class QemuVM:
         )
 
     def _resolve_host_socket(self, sandbox_path: str) -> str:
-        """Resolve a sandbox socket path to its host-accessible path."""
-        # Check for explicit host path override (set by caller for volumes)
+        """Resolve a sandbox socket path to its host-accessible path.
+
+        Checks (in order): explicit override attrs, volume mounts,
+        then overlayfs host path.
+        """
+        # 1. Explicit host path override (set by caller).
         for attr in ("_host_qmp_path", "_host_qga_path"):
             host = getattr(self, attr, None)
             if host and sandbox_path in host and Path(host).exists():
                 return host
+
+        # 2. Volume mounts — socket on a bind-mounted path is
+        #    directly accessible from the host.
+        for vol in self._sb._config.volumes:
+            parts = vol.split(":")
+            if len(parts) >= 2:
+                host_part, container_part = parts[0], parts[1]
+                if sandbox_path.startswith(container_part + "/") or sandbox_path == container_part:
+                    rel = sandbox_path[len(container_part):].lstrip("/")
+                    resolved = Path(host_part) / rel
+                    if resolved.exists():
+                        return str(resolved)
+
+        # 3. Overlayfs host path (upper dir / layer search).
         host = self._sb._host_path(sandbox_path)
         if host.exists():
             return str(host)
+
         raise FileNotFoundError(
-            f"Socket not accessible from host: {sandbox_path}"
+            f"Socket not accessible from host: {sandbox_path}. "
+            f"Place it on a volume mount for host-side access."
         )
+
+    def _install_qmp_helper(self) -> None:
+        """Copy the nbx-qmp static binary into the sandbox.
+
+        Used as fallback when the QMP socket is not host-accessible
+        (e.g. on overlayfs without a volume mount).
+        """
+        vendor_dir = Path(__file__).parent / "_vendor"
+        helper_src = vendor_dir / "nbx-qmp"
+        if not helper_src.exists():
+            raise FileNotFoundError(
+                f"nbx-qmp binary not found at {helper_src}. "
+                "Rebuild: rustc --edition 2024 -C opt-level=2 -C panic=abort "
+                "-C link-arg=-nostdlib -C link-arg=-static -C strip=symbols "
+                "-o nbx-qmp rust/src/bin/nbx_qmp.rs"
+            )
+        self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
+        self._sb.run(f"chmod +x {_QMP_HELPER}")
 
     def _qmp_exec(
         self, command: str, arguments: dict | None = None,
         timeout: int = 30,
     ) -> dict:
-        """Send a QMP command via the Rust native client (host-side)."""
+        """Send a QMP command.
+
+        Tries the Rust native QMP client first (host-side, no subprocess
+        overhead).  Falls back to the nbx-qmp static binary inside the
+        sandbox if the host-side socket is not reachable.
+        """
         msg: dict[str, Any] = {"execute": command}
         if arguments:
             msg["arguments"] = arguments
         msg_json = json.dumps(msg)
 
-        host_sock = self._resolve_host_socket(self._qmp_path)
-        from nitrobox._core import py_qmp_send
-        output = py_qmp_send(host_sock, msg_json, timeout)
-        return json.loads(output)
+        # Try host-side Rust binding first.
+        try:
+            host_sock = self._resolve_host_socket(self._qmp_path)
+            from nitrobox._core import py_qmp_send
+            output = py_qmp_send(host_sock, msg_json, timeout)
+            return json.loads(output)
+        except (OSError, ImportError, FileNotFoundError):
+            pass  # fall through to sandbox-side helper
+
+        # Fallback: nbx-qmp static binary inside sandbox.
+        output, ec = self._sb.run(
+            f"{_QMP_HELPER} "
+            f"{shlex.quote(self._qmp_path)} "
+            f"{shlex.quote(msg_json)}",
+            timeout=timeout,
+        )
+        if ec != 0:
+            raise RuntimeError(f"QMP command failed (ec={ec}): {output}")
+        try:
+            return json.loads(output.strip())
+        except json.JSONDecodeError:
+            raise RuntimeError(f"QMP invalid response: {output}")
 
     # ------------------------------------------------------------------ #
     #  QGA (QEMU Guest Agent)                                              #
