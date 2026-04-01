@@ -1,8 +1,11 @@
 """QEMU/KVM virtual machine manager for nitrobox sandboxes.
 
 Manages a QEMU process inside a sandbox and provides QMP (QEMU Monitor
-Protocol) communication for VM state management.  Designed for
-OSWorld-style GUI agent training where fast VM reset is critical.
+Protocol) communication for VM state management, plus QEMU Guest Agent
+(QGA) for executing commands inside the VM guest.
+
+Designed for OSWorld-style GUI agent training where fast VM reset is
+critical.
 
 Usage::
 
@@ -11,11 +14,13 @@ Usage::
 
     sb = Sandbox(SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"]))
     vm = QemuVM(sb, disk="/path/to/vm.qcow2", memory="4G")
-    vm.start()          # boot VM + QMP handshake
-    vm.savevm("ready")  # snapshot VM state
+    vm.start()
+    vm.wait_guest_ready()       # wait for guest OS + qemu-ga
+    vm.savevm("ready")
 
-    # Episode loop (1-5s per reset):
+    # Episode loop:
     vm.loadvm("ready")
+    out, ec = vm.guest_exec("echo hello")  # run command in guest
     # ... agent actions ...
 
     vm.stop()
@@ -24,10 +29,13 @@ Usage::
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import random
 import shlex
+import socket as _socket
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,7 +46,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _QMP_SOCKET = "/tmp/.nbx_qmp.sock"
-_QMP_HELPER = "/tmp/.nbx_qmp"  # static binary copied into sandbox
+_QGA_SOCKET = "/tmp/.nbx_qga.sock"
 
 
 class QemuVM:
@@ -55,9 +63,12 @@ class QemuVM:
             Default ``"none"`` (headless — use :meth:`screenshot`).
         extra_args: Additional QEMU command-line arguments.
         qmp_socket: QMP Unix socket path inside the sandbox.
+        qga_socket: QGA (Guest Agent) Unix socket path inside the
+            sandbox.  The guest must have ``qemu-ga`` running for
+            :meth:`guest_exec` and related methods to work.
         cmd_override: Complete QEMU command line string.  When set,
             ``disk``/``memory``/``cpus``/``display``/``extra_args`` are
-            ignored and only the ``-qmp`` socket argument is appended.
+            ignored and only ``-qmp`` and QGA arguments are appended.
             Use this for complex VM setups (e.g. Windows/macOS with
             pflash, TPM, custom networking).
 
@@ -70,10 +81,12 @@ class QemuVM:
         ))
         vm = QemuVM(sb, disk="/vms/osworld.qcow2", memory="4G", cpus=4)
         vm.start()
+        vm.wait_guest_ready()   # wait for qemu-ga
         vm.savevm("ready")
 
         for episode in range(1000):
             vm.loadvm("ready")   # 1-5s
+            out, ec = vm.guest_exec("whoami")
             # ... agent loop ...
 
         vm.stop()
@@ -89,6 +102,7 @@ class QemuVM:
         display: str = "none",
         extra_args: list[str] | None = None,
         qmp_socket: str = _QMP_SOCKET,
+        qga_socket: str = _QGA_SOCKET,
         cmd_override: str | None = None,
     ):
         self._sb = sandbox
@@ -98,6 +112,7 @@ class QemuVM:
         self._display = display
         self._extra_args = extra_args or []
         self._qmp_path = qmp_socket
+        self._qga_path = qga_socket
         self._cmd_override = cmd_override
         self._handle: str | None = None
 
@@ -119,7 +134,6 @@ class QemuVM:
             TimeoutError: QMP socket not ready within *timeout*.
             FileNotFoundError: ``qemu-system-x86_64`` not found.
         """
-        self._install_qmp_helper()
         cmd = self._build_cmd()
 
         if self._cmd_override:
@@ -306,14 +320,23 @@ class QemuVM:
         """Build the QEMU command line.
 
         If *cmd_override* was provided at construction, use it verbatim
-        (only the ``-qmp`` socket arg is appended).  Otherwise build a
-        standard command from the disk/memory/cpus/display parameters.
+        (only ``-qmp`` and QGA arguments are appended).  Otherwise build
+        a standard command from the disk/memory/cpus/display parameters.
+
+        QGA (Guest Agent) is always enabled via a virtio-serial channel.
+        The guest must have ``qemu-ga`` running to use :meth:`guest_exec`.
         """
         qmp_spec = f"unix:{self._qmp_path},server,nowait"
+        qga_chardev = f"socket,id=nbxqga,path={self._qga_path},server=on,wait=off"
+        qga_suffix = (
+            f" -chardev {qga_chardev}"
+            f" -device virtio-serial-pci,id=nbx-vser"
+            f" -device virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
+            f"name=org.qemu.guest_agent.0"
+        )
 
         if self._cmd_override:
-            # Caller provides full command; we only append QMP socket.
-            return f"{self._cmd_override} -qmp {qmp_spec}"
+            return f"{self._cmd_override} -qmp {qmp_spec}{qga_suffix}"
 
         args = [
             "qemu-system-x86_64",
@@ -322,6 +345,10 @@ class QemuVM:
             "-smp", str(self._cpus),
             "-drive", f"file={self._disk},format=qcow2,if=virtio",
             "-qmp", qmp_spec,
+            "-chardev", qga_chardev,
+            "-device", "virtio-serial-pci,id=nbx-vser",
+            "-device", "virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
+                       "name=org.qemu.guest_agent.0",
             "-display", self._display,
             "-no-shutdown",
         ]
@@ -348,68 +375,238 @@ class QemuVM:
             f"QMP socket not ready after {timeout}s at {self._qmp_path}"
         )
 
-    def _install_qmp_helper(self) -> None:
-        """Copy the nbx-qmp static binary into the sandbox.
-
-        Only needed when the Rust QMP binding is unavailable or the
-        QMP socket is not host-accessible (e.g. on overlayfs).
-        """
-        vendor_dir = Path(__file__).parent / "_vendor"
-        helper_src = vendor_dir / "nbx-qmp"
-        if not helper_src.exists():
-            raise FileNotFoundError(
-                f"nbx-qmp binary not found at {helper_src}. "
-                "Rebuild: rustc --edition 2024 -C opt-level=z -C panic=abort "
-                "-C link-arg=-nostdlib -C link-arg=-static -C strip=symbols "
-                "-o nbx-qmp rust/src/bin/nbx_qmp.rs"
-            )
-        self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
-        self._sb.run(f"chmod +x {_QMP_HELPER}")
+    def _resolve_host_socket(self, sandbox_path: str) -> str:
+        """Resolve a sandbox socket path to its host-accessible path."""
+        # Check for explicit host path override (set by caller for volumes)
+        for attr in ("_host_qmp_path", "_host_qga_path"):
+            host = getattr(self, attr, None)
+            if host and sandbox_path in host and Path(host).exists():
+                return host
+        host = self._sb._host_path(sandbox_path)
+        if host.exists():
+            return str(host)
+        raise FileNotFoundError(
+            f"Socket not accessible from host: {sandbox_path}"
+        )
 
     def _qmp_exec(
         self, command: str, arguments: dict | None = None,
         timeout: int = 30,
     ) -> dict:
-        """Send a QMP command.
-
-        Tries the Rust native QMP client first (host-side, no subprocess
-        overhead).  Falls back to the nbx-qmp static binary inside the
-        sandbox if the host-side socket is not reachable.
-        """
+        """Send a QMP command via the Rust native client (host-side)."""
         msg: dict[str, Any] = {"execute": command}
         if arguments:
             msg["arguments"] = arguments
         msg_json = json.dumps(msg)
 
-        # Try Rust binding (host-side, direct socket access).
-        # Prefer _host_qmp_path (set by caller for volume-mounted sockets)
-        # over _host_path() which may not resolve volume mounts correctly.
-        try:
-            host_sock_str = getattr(self, "_host_qmp_path", None)
-            if not host_sock_str:
-                host_sock = self._sb._host_path(self._qmp_path)
-                if host_sock.exists():
-                    host_sock_str = str(host_sock)
-            if host_sock_str and Path(host_sock_str).exists():
-                from nitrobox._core import py_qmp_send
-                output = py_qmp_send(host_sock_str, msg_json, timeout)
-                return json.loads(output)
-        except (OSError, ImportError):
-            pass  # fall through to sandbox-side helper
+        host_sock = self._resolve_host_socket(self._qmp_path)
+        from nitrobox._core import py_qmp_send
+        output = py_qmp_send(host_sock, msg_json, timeout)
+        return json.loads(output)
 
-        # Fallback: nbx-qmp binary inside sandbox
-        output, ec = self._sb.run(
-            f"{_QMP_HELPER} "
-            f"{shlex.quote(self._qmp_path)} "
-            f"{shlex.quote(msg_json)}",
-            timeout=30,
-        )
-        if ec != 0:
-            raise RuntimeError(f"QMP command failed (ec={ec}): {output}")
+    # ------------------------------------------------------------------ #
+    #  QGA (QEMU Guest Agent)                                              #
+    # ------------------------------------------------------------------ #
+
+    def _qga_send(
+        self, command: str, arguments: dict | None = None, timeout: int = 30,
+    ) -> dict:
+        """Send a QGA command and return the response.
+
+        Opens a fresh connection each call: connect → sync-delimited
+        handshake → send command → read response → close.  This avoids
+        stale-connection issues after loadvm.
+        """
+        host_sock = self._resolve_host_socket(self._qga_path)
+
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(host_sock)
+        f = s.makefile("rb")
+
         try:
-            return json.loads(output.strip())
-        except json.JSONDecodeError:
-            raise RuntimeError(f"QMP invalid response: {output}")
+            # Sync handshake: flush any stale data on virtio-serial.
+            sync_id = random.randint(1, 2**31)
+            s.sendall(
+                b"\xff"
+                + json.dumps({
+                    "execute": "guest-sync-delimited",
+                    "arguments": {"id": sync_id},
+                }).encode()
+                + b"\n"
+            )
+            while True:
+                line = f.readline()
+                if not line:
+                    raise RuntimeError("QGA closed during sync")
+                line = line.lstrip(b"\xff").strip()
+                if not line:
+                    continue
+                try:
+                    resp = json.loads(line)
+                    if resp.get("return") == sync_id:
+                        break
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+
+            # Send actual command.
+            msg: dict[str, Any] = {"execute": command}
+            if arguments:
+                msg["arguments"] = arguments
+            s.sendall(json.dumps(msg).encode() + b"\n")
+
+            # Read response.
+            while True:
+                line = f.readline()
+                if not line:
+                    raise RuntimeError("QGA closed before response")
+                line = line.strip()
+                if not line:
+                    continue
+                resp = json.loads(line)
+                if "error" in resp:
+                    raise RuntimeError(
+                        f"QGA {command}: {resp['error'].get('desc', resp['error'])}"
+                    )
+                return resp
+        finally:
+            f.close()
+            s.close()
+
+    def guest_ping(self, timeout: int = 5) -> bool:
+        """Check if the QEMU Guest Agent is responsive.
+
+        Returns ``True`` if ``qemu-ga`` responds, ``False`` on timeout
+        or connection error.
+        """
+        try:
+            self._qga_send("guest-ping", timeout=timeout)
+            return True
+        except (OSError, RuntimeError):
+            return False
+
+    def wait_guest_ready(self, timeout: int = 300) -> None:
+        """Wait for the guest OS and ``qemu-ga`` to become responsive.
+
+        Call this after :meth:`start` (first boot) or when the guest
+        needs time to initialize.  After :meth:`loadvm` this is usually
+        not needed — the agent resumes immediately.
+
+        Args:
+            timeout: Max seconds to wait.
+
+        Raises:
+            TimeoutError: Guest agent not responsive within *timeout*.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.guest_ping(timeout=3):
+                logger.info("Guest agent ready")
+                return
+            time.sleep(1)
+        raise TimeoutError(
+            f"Guest agent not ready after {timeout}s "
+            f"(is qemu-ga running in the guest?)"
+        )
+
+    def guest_exec(
+        self, command: str, timeout: int = 30,
+    ) -> tuple[str, int]:
+        """Execute a shell command inside the VM guest.
+
+        Requires ``qemu-ga`` running in the guest.
+
+        Args:
+            command: Shell command string (run via ``/bin/bash -c``).
+            timeout: Max seconds to wait for the command to finish.
+
+        Returns:
+            ``(output, exit_code)`` — stdout + stderr combined,
+            and the process exit code.
+
+        Raises:
+            RuntimeError: QGA communication error.
+            TimeoutError: Command did not finish within *timeout*.
+        """
+        resp = self._qga_send("guest-exec", {
+            "path": "/bin/bash",
+            "arg": ["-c", command],
+            "capture-output": True,
+        })
+        pid = resp["return"]["pid"]
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self._qga_send("guest-exec-status", {"pid": pid})
+            ret = status["return"]
+            if ret["exited"]:
+                stdout = base64.b64decode(
+                    ret.get("out-data", "")
+                ).decode("utf-8", errors="replace")
+                stderr = base64.b64decode(
+                    ret.get("err-data", "")
+                ).decode("utf-8", errors="replace")
+                output = stdout + stderr if stderr else stdout
+                return output, ret.get("exitcode", -1)
+            time.sleep(0.1)
+
+        raise TimeoutError(f"guest-exec timed out after {timeout}s")
+
+    def guest_file_read(self, path: str) -> bytes:
+        """Read a file from the VM guest filesystem.
+
+        Args:
+            path: Absolute path inside the guest.
+
+        Returns:
+            File contents as bytes.
+        """
+        resp = self._qga_send("guest-file-open", {
+            "path": path, "mode": "r",
+        })
+        handle = resp["return"]
+        try:
+            chunks: list[bytes] = []
+            while True:
+                resp = self._qga_send("guest-file-read", {
+                    "handle": handle, "count": 65536,
+                })
+                ret = resp["return"]
+                data = base64.b64decode(ret.get("buf-b64", ""))
+                if data:
+                    chunks.append(data)
+                if ret.get("eof", False):
+                    break
+            return b"".join(chunks)
+        finally:
+            self._qga_send("guest-file-close", {"handle": handle})
+
+    def guest_file_write(self, path: str, data: bytes) -> None:
+        """Write data to a file in the VM guest filesystem.
+
+        Args:
+            path: Absolute path inside the guest.
+            data: File contents to write.
+        """
+        resp = self._qga_send("guest-file-open", {
+            "path": path, "mode": "w",
+        })
+        handle = resp["return"]
+        try:
+            offset = 0
+            while offset < len(data):
+                chunk = data[offset:offset + 65536]
+                self._qga_send("guest-file-write", {
+                    "handle": handle,
+                    "buf-b64": base64.b64encode(chunk).decode("ascii"),
+                })
+                offset += len(chunk)
+        finally:
+            self._qga_send("guest-file-close", {"handle": handle})
+
+    # ------------------------------------------------------------------ #
+    #  Dunder                                                              #
+    # ------------------------------------------------------------------ #
 
     def __del__(self):
         try:
