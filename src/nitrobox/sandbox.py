@@ -208,6 +208,18 @@ class Sandbox:
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.debug("cmd (%.1fms exit=%d): %.200s", elapsed_ms, exit_code, cmd_str)
+
+        if (
+            exit_code != 0
+            and self._subuid_range is None
+            and ("setgroups" in output or "setegid" in output or "seteuid" in output)
+        ):
+            logger.error(
+                "Command failed due to missing multi-UID mapping. "
+                "Install the 'uidmap' package: "
+                "sudo apt-get install -y uidmap"
+            )
+
         return output, exit_code
 
     async def arun(
@@ -1328,15 +1340,17 @@ class Sandbox:
             return cls._cached_subuid_range
 
         if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
-            raise SandboxInitError(
-                "newuidmap/newgidmap not found. These are required for full "
-                "UID mapping inside sandboxes (apt-get, su, and other programs "
-                "that switch users will fail without them).\n"
-                "Install with:\n"
+            logger.warning(
+                "newuidmap/newgidmap not found — falling back to single-UID "
+                "mapping. Programs that switch users (apt-get, su, sudo) may "
+                "fail with 'Operation not permitted'. "
+                "Install the 'uidmap' package for full multi-UID support:\n"
                 "  Ubuntu/Debian: sudo apt-get install -y uidmap\n"
                 "  Fedora/RHEL:   sudo dnf install -y shadow-utils\n"
                 "  Arch:          sudo pacman -S shadow"
             )
+            cls._subuid_detected = True
+            return None
 
         import getpass
         try:
