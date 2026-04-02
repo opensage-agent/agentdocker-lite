@@ -503,7 +503,11 @@ class ComposeProject:
             net_names = svc.networks or ["default"]
             primary_net = net_names[0]
             if primary_net not in self._shared_nets:
-                self._shared_nets[primary_net] = SharedNetwork(primary_net)
+                self._shared_nets[primary_net] = SharedNetwork(
+                    primary_net,
+                    internet=True,
+                    port_map=svc.ports or [],
+                )
             sn = self._shared_nets[primary_net]
             shared_userns = sn.userns_path
             net_ns = sn.netns_path
@@ -558,6 +562,14 @@ class ComposeProject:
         sb = Sandbox(config, name=sandbox_name)
 
         self._write_hosts(sb, hosts, svc.extra_hosts)
+        # Write /etc/resolv.conf with pasta DNS forwarder when using
+        # shared network (matching Podman's pod networking behaviour:
+        # pastaResult.DNSForwardIPs → resolv.conf nameservers).
+        if svc.network_mode != "host" and not svc.dns:
+            primary_net = (svc.networks or ["default"])[0]
+            sn = self._shared_nets.get(primary_net)
+            if sn is not None and sn.has_pasta:
+                self._write_resolv(sb, sn.dns_forward_ips)
         self._apply_sysctls(sb, svc)
         return sb
 
@@ -590,6 +602,25 @@ class ComposeProject:
         try:
             sb.run(
                 f"rm -rf /etc/hosts 2>/dev/null; printf '{content}' > /etc/hosts",
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _write_resolv(sb: Sandbox, nameservers: list[str]) -> None:
+        """Write /etc/resolv.conf with the given nameservers.
+
+        Mirrors Podman's behaviour: when pasta provides NAT + DNS
+        forwarding in the shared network namespace, containers need
+        ``/etc/resolv.conf`` pointing to pasta's DNS forwarder
+        (``169.254.1.1``).
+        """
+        lines = [f"nameserver {ns}" for ns in nameservers]
+        content = "\\n".join(lines) + "\\n"
+        try:
+            sb.run(
+                f"rm -rf /etc/resolv.conf 2>/dev/null; printf '{content}' > /etc/resolv.conf",
                 timeout=5,
             )
         except Exception:

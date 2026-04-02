@@ -6,12 +6,25 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, List
 
 from nitrobox.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
+
+
+def _find_pasta_bin() -> str | None:
+    """Find the pasta binary (vendored or system)."""
+    vendored = Path(__file__).resolve().parent.parent / "_vendor" / "pasta"
+    if vendored.exists() and vendored.is_file():
+        return str(vendored)
+    if shutil.which("pasta"):
+        return "pasta"
+    return None
 
 
 class SharedNetwork:
@@ -21,14 +34,26 @@ class SharedNetwork:
     uid mapping) and a network namespace.  Other sandboxes join the
     sentinel's namespaces via ``nsenter``.
 
+    By default, pasta is attached to the shared netns to provide NAT
+    and DNS forwarding, giving containers internet access (matching
+    Docker Compose's default behaviour).  Pass ``internet=False`` to
+    disable this.
+
     This mirrors Podman's pod infra container: one shared userns+netns
     per pod, individual mount/pid namespaces per container.
     """
 
-    def __init__(self, name: str = "default") -> None:
-        import subprocess as _subprocess
-
+    def __init__(
+        self,
+        name: str = "default",
+        *,
+        internet: bool = True,
+        port_map: list[str] | None = None,
+    ) -> None:
         self.name = name
+        self.has_pasta: bool = False
+        self.dns_forward_ips: list[str] = []
+        self.guest_ip: str | None = None
         # Detect subuid range (reuse rootless sandbox logic)
         self._subuid_range = Sandbox._detect_subuid_range()
 
@@ -38,11 +63,11 @@ class SharedNetwork:
             unshare_cmd.insert(2, "--map-root-user")
         unshare_cmd.extend(["--", "sleep", "infinity"])
 
-        self._sentinel = _subprocess.Popen(
+        self._sentinel = subprocess.Popen(
             unshare_cmd,
             start_new_session=True,
-            stdout=_subprocess.DEVNULL,
-            stderr=_subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
         try:
@@ -66,21 +91,74 @@ class SharedNetwork:
                 outer_uid, sub_start, sub_count = self._subuid_range
                 outer_gid = os.getgid()
                 pid = self._sentinel.pid
-                _subprocess.run(
+                subprocess.run(
                     ["newuidmap", str(pid),
                      "0", str(outer_uid), "1",
                      "1", str(sub_start), str(sub_count)],
                     check=True, capture_output=True,
                 )
-                _subprocess.run(
+                subprocess.run(
                     ["newgidmap", str(pid),
                      "0", str(outer_gid), "1",
                      "1", str(sub_start), str(sub_count)],
                     check=True, capture_output=True,
                 )
+
+            # Attach pasta for NAT + DNS (like Docker Compose default networking)
+            if internet:
+                self._start_pasta(port_map or [])
+
         except Exception:
             self.destroy()
             raise
+
+    def _start_pasta(self, port_map: list[str]) -> None:
+        """Attach pasta to the sentinel's netns for NAT and DNS forwarding.
+
+        Uses pasta's PID mode (``pasta PID``) which attaches to the
+        network namespace of the given process — no bind-mount needed.
+        """
+        pasta_bin = _find_pasta_bin()
+        if not pasta_bin:
+            logger.warning(
+                "pasta not found — shared network will have no internet access. "
+                "Install 'passt' package or ensure vendored pasta is available."
+            )
+            return
+
+        pid = self._sentinel.pid
+
+        cmd: list[str] = [
+            pasta_bin, "--config-net",
+            "--ipv4-only",
+        ]
+        for mapping in port_map:
+            cmd.extend(["-t", mapping])
+        cmd.extend([
+            "-u", "none", "-T", "none", "-U", "none",
+            "--dns-forward", "169.254.1.1",
+            "--no-map-gw", "--quiet",
+            "--map-guest-addr", "169.254.1.2",
+            str(pid),
+        ])
+
+        out = subprocess.run(cmd, capture_output=True, text=True)
+        if out.returncode != 0:
+            logger.warning(
+                "pasta failed (exit=%d): %s — shared network will have no internet",
+                out.returncode, out.stderr.strip(),
+            )
+            return
+
+        # Parse pasta output to get actual DNS and guest IP
+        # (matching Podman's pastaResult.DNSForwardIPs / IPAddresses)
+        self.dns_forward_ips = _parse_pasta_dns(out.stderr)
+        self.guest_ip = _parse_pasta_guest_ip(out.stderr)
+        self.has_pasta = True
+        logger.debug(
+            "pasta ready for shared network %r (pid=%d, dns=%s, guest_ip=%s)",
+            self.name, pid, self.dns_forward_ips, self.guest_ip,
+        )
 
     @property
     def userns_path(self) -> str:
@@ -115,6 +193,46 @@ class SharedNetwork:
     def __repr__(self) -> str:
         state = "alive" if self.alive else "dead"
         return f"SharedNetwork({self.name!r}, {state})"
+
+
+def _parse_pasta_dns(output: str) -> list[str]:
+    """Extract DNS forward IPs from pasta's stderr output.
+
+    Pasta prints lines like::
+
+        DNS:
+            169.254.1.1
+    """
+    ips: list[str] = []
+    in_dns = False
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DNS:"):
+            in_dns = True
+            continue
+        if in_dns:
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", stripped):
+                ips.append(stripped)
+            else:
+                in_dns = False
+    return ips or ["169.254.1.1"]  # fallback
+
+
+def _parse_pasta_guest_ip(output: str) -> str | None:
+    """Extract DHCP-assigned guest IP from pasta's stderr output.
+
+    Pasta prints lines like::
+
+        DHCP:
+            assign: 10.0.2.15
+    """
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("assign:"):
+            ip = stripped.split(":", 1)[1].strip()
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip):
+                return ip
+    return None
 
 
 # ------------------------------------------------------------------ #

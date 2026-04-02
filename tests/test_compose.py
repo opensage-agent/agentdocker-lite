@@ -2023,3 +2023,96 @@ class TestHealthMonitor:
         # Short timeout — should hit deadline before retries exhaust
         with pytest.raises(RuntimeError, match="Health check"):
             proj.up(timeout=5)
+
+
+# ------------------------------------------------------------------ #
+#  Pasta output parsing + SharedNetwork DNS                           #
+# ------------------------------------------------------------------ #
+
+
+class TestPastaOutputParsing:
+    """Unit tests for parsing pasta's stderr output."""
+
+    SAMPLE_PASTA_OUTPUT = """\
+Template interface: ens99f1 (IPv4)
+Namespace interface: ens99f1
+MAC:
+    host: 9a:55:9a:55:9a:55
+DHCP:
+    assign: 216.81.245.204
+    mask: 255.255.255.0
+    router: 216.81.245.254
+DNS:
+    169.254.1.1
+DNS search list:
+    .
+Inbound forwarding:
+    TCP [*]:1-65535  =>  1-65535  (auto-scan)
+Outbound forwarding:
+"""
+
+    def test_parse_dns_from_pasta_output(self):
+        from nitrobox.compose._network import _parse_pasta_dns
+        result = _parse_pasta_dns(self.SAMPLE_PASTA_OUTPUT)
+        assert result == ["169.254.1.1"]
+
+    def test_parse_dns_empty_output(self):
+        from nitrobox.compose._network import _parse_pasta_dns
+        result = _parse_pasta_dns("")
+        assert result == ["169.254.1.1"]  # fallback
+
+    def test_parse_dns_no_dns_section(self):
+        from nitrobox.compose._network import _parse_pasta_dns
+        result = _parse_pasta_dns("Template interface: eth0\nMAC:\n")
+        assert result == ["169.254.1.1"]  # fallback
+
+    def test_parse_dns_multiple_servers(self):
+        from nitrobox.compose._network import _parse_pasta_dns
+        output = "DNS:\n    8.8.8.8\n    8.8.4.4\nDNS search list:\n"
+        result = _parse_pasta_dns(output)
+        assert result == ["8.8.8.8", "8.8.4.4"]
+
+    def test_parse_guest_ip(self):
+        from nitrobox.compose._network import _parse_pasta_guest_ip
+        result = _parse_pasta_guest_ip(self.SAMPLE_PASTA_OUTPUT)
+        assert result == "216.81.245.204"
+
+    def test_parse_guest_ip_empty(self):
+        from nitrobox.compose._network import _parse_pasta_guest_ip
+        result = _parse_pasta_guest_ip("")
+        assert result is None
+
+    def test_parse_guest_ip_no_dhcp(self):
+        from nitrobox.compose._network import _parse_pasta_guest_ip
+        result = _parse_pasta_guest_ip("Template interface: eth0\n")
+        assert result is None
+
+
+class TestWriteResolv:
+    """Unit tests for _write_resolv (mock-based)."""
+
+    def test_write_resolv_calls_run(self):
+        from nitrobox.compose._project import ComposeProject
+        sb = MagicMock()
+        sb.run = MagicMock(return_value=("", 0))
+        ComposeProject._write_resolv(sb, ["169.254.1.1"])
+        sb.run.assert_called_once()
+        call_args = sb.run.call_args[0][0]
+        assert "169.254.1.1" in call_args
+        assert "resolv.conf" in call_args
+
+    def test_write_resolv_multiple_nameservers(self):
+        from nitrobox.compose._project import ComposeProject
+        sb = MagicMock()
+        sb.run = MagicMock(return_value=("", 0))
+        ComposeProject._write_resolv(sb, ["8.8.8.8", "8.8.4.4"])
+        call_args = sb.run.call_args[0][0]
+        assert "8.8.8.8" in call_args
+        assert "8.8.4.4" in call_args
+
+    def test_write_resolv_exception_swallowed(self):
+        from nitrobox.compose._project import ComposeProject
+        sb = MagicMock()
+        sb.run = MagicMock(side_effect=RuntimeError("sandbox dead"))
+        # Should not raise
+        ComposeProject._write_resolv(sb, ["169.254.1.1"])
