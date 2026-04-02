@@ -502,6 +502,47 @@ class TestQGAProtocol:
         assert data == server.file_content
         assert len(data) == 100_000
 
+    def test_guest_file_write_short_write(self, mock_qga):
+        """Short write from QGA raises RuntimeError."""
+        vm, server = mock_qga
+        # Patch mock to report fewer bytes written than sent
+        original_handle = server._handle
+
+        def _handle_short_write(conn):
+            f = conn.makefile("rb")
+            try:
+                for raw in f:
+                    line = raw.lstrip(b"\xff").strip()
+                    if not line:
+                        continue
+                    try:
+                        req = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    cmd = req.get("execute", "")
+                    args = req.get("arguments", {})
+                    if cmd == "guest-sync-delimited":
+                        conn.sendall(b"\xff" + json.dumps({"return": args["id"]}).encode() + b"\n")
+                    elif cmd == "guest-file-open":
+                        conn.sendall(json.dumps({"return": 1}).encode() + b"\n")
+                    elif cmd == "guest-file-write":
+                        # Report only 1 byte written
+                        conn.sendall(json.dumps({"return": {"count": 1}}).encode() + b"\n")
+                    elif cmd == "guest-file-close":
+                        conn.sendall(json.dumps({"return": {}}).encode() + b"\n")
+                    else:
+                        conn.sendall(json.dumps({"return": {}}).encode() + b"\n")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                f.close()
+                conn.close()
+
+        server._handle = _handle_short_write
+        with pytest.raises(RuntimeError, match="short write"):
+            vm.guest_file_write("/tmp/test.bin", b"hello")
+        server._handle = original_handle
+
     def test_guest_file_read_write_roundtrip(self, mock_qga):
         """Write then read the same data back."""
         vm, server = mock_qga

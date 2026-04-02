@@ -738,10 +738,16 @@ class QemuVM:
                 offset = 0
                 while offset < len(data):
                     chunk = data[offset:offset + 65536]
-                    self._qga_cmd(s, f, "guest-file-write", {
+                    resp = self._qga_cmd(s, f, "guest-file-write", {
                         "handle": handle,
                         "buf-b64": base64.b64encode(chunk).decode("ascii"),
                     })
+                    written = resp.get("return", {}).get("count", 0)
+                    if written != len(chunk):
+                        raise RuntimeError(
+                            f"QGA short write: sent {len(chunk)} bytes, "
+                            f"wrote {written}"
+                        )
                     offset += len(chunk)
             finally:
                 self._qga_cmd(s, f, "guest-file-close", {"handle": handle})
