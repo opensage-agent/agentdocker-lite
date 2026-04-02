@@ -512,6 +512,12 @@ class TestQGAProtocol:
         data = vm.guest_file_read("/tmp/rt.txt")
         assert data == payload
 
+    def test_qga_error_response(self, mock_qga):
+        """QGA error response raises RuntimeError."""
+        vm, _ = mock_qga
+        with pytest.raises(RuntimeError, match="nonexistent-command"):
+            vm._qga_send("nonexistent-command")
+
     def test_build_cmd_includes_qga(self):
         """_build_cmd includes QGA chardev + virtio-serial device."""
         vm = QemuVM.__new__(QemuVM)

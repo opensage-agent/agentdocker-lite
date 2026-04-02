@@ -576,7 +576,12 @@ class QemuVM:
             line = line.strip()
             if not line:
                 continue
-            resp = json.loads(line)
+            try:
+                resp = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise RuntimeError(
+                    f"QGA {command}: malformed response: {line!r}"
+                )
             if "error" in resp:
                 raise RuntimeError(
                     f"QGA {command}: {resp['error'].get('desc', resp['error'])}"
