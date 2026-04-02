@@ -532,6 +532,7 @@ python examples/benchmark.py
 | `--memory-swap 1g` | `memory_swap="1g"` |
 | `--tmpfs /run:size=100m` | `tmpfs=["/run:size=100m"]` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
+| `docker compose -f a.yaml -f b.yaml up -d` | `ComposeProject(["a.yaml", "b.yaml"]).up()` |
 | `docker compose down` | `proj.down()` |
 
 ## Drop-in Docker migration
@@ -591,6 +592,13 @@ from nitrobox import ComposeProject
 proj = ComposeProject("docker-compose.yml", env={"API_PORT": "8030"})
 proj.up()
 
+# Multi-file merge (like docker compose -f base.yaml -f override.yaml)
+proj = ComposeProject(
+    ["docker-compose-base.yaml", "docker-compose-override.yaml"],
+    env={"IMAGE": "myapp:latest"},
+)
+proj.up()
+
 # Access individual services
 proj.services["api"].run("curl localhost:8030/health")
 
@@ -617,7 +625,8 @@ Unsupported fields raise `ValueError` at parse time — no silent ignoring.
 |---|---|
 | **Supported** | `image`, `build`, `command`, `entrypoint`, `environment`, `env_file`, `volumes` (named + bind + `:ro`), `ports`, `devices`, `depends_on` (with `condition`: `service_started` / `service_healthy`), `healthcheck` (CMD, CMD-SHELL; `interval`, `timeout`, `retries`, `start_period`, `start_interval`), `network_mode`, `dns`, `hostname`, `working_dir`, `restart`, `security_opt`, `cap_add`, `privileged`, `stop_grace_period`, `ulimits`, `shm_size`, `tmpfs`, `cpu_shares`, `mem_limit`, `memswap_limit`, `extra_hosts`, `sysctls` |
 | **Supported** | `networks` — services on the same network share a network namespace (can communicate via localhost). Services on different networks are isolated (different netns). Uses Podman-style shared userns+netns sentinel per network. |
+| **Supported** | `deploy.resources.limits.cpus` → `cpu_max`, `deploy.resources.limits.memory` → `memory_max`, `pull_policy` (parsed, ignored) |
 | **Parsed, ignored** | `container_name`, `profiles`, `stdin_open`, `tty`, `labels`, `logging`, `init` (persistent shell handles zombie reaping), `user` (rootless: uid 0 maps to unprivileged host user), `pid`, `ipc` (need Rust core changes for real support) |
-| **Not supported (will error)** | `configs`, `secrets`, `deploy`, `cgroup_parent`, `runtime` |
+| **Not supported (will error)** | `configs`, `secrets`, `cgroup_parent`, `runtime` |
 
 **Health check behaviour** mirrors Docker Engine: a background monitor thread runs the check command at the configured `interval` (default 30s). During `start_period`, it uses `start_interval` (default 5s) and failures don't count toward the `retries` threshold. `up()` polls the monitor status every 500ms (matching Docker Compose's `convergence.go` ticker) and blocks until healthy or `timeout` is reached.

@@ -19,6 +19,7 @@ from nitrobox.compose import (
     _substitute,
     _topo_sort,
 )
+from nitrobox.compose._parse import _deep_merge
 from nitrobox.compose._project import _HealthMonitor
 
 
@@ -580,6 +581,211 @@ class TestNewComposeFields:
         services, _ = _parse_compose(compose, {})
         assert services["str_form"].tmpfs == ["/run"]
         assert services["list_form"].tmpfs == ["/run", "/tmp"]
+
+
+# ------------------------------------------------------------------ #
+#  Multi-file merge & deploy limits                                    #
+# ------------------------------------------------------------------ #
+
+
+class TestDeepMerge:
+    """Unit tests for docker-compose multi-file merge semantics."""
+
+    def test_scalars_override(self):
+        base = {"services": {"main": {"image": "ubuntu:20.04"}}}
+        over = {"services": {"main": {"image": "ubuntu:22.04"}}}
+        assert _deep_merge(base, over)["services"]["main"]["image"] == "ubuntu:22.04"
+
+    def test_mappings_merge_recursively(self):
+        base = {"services": {"main": {"environment": {"A": "1", "B": "2"}}}}
+        over = {"services": {"main": {"environment": {"B": "3", "C": "4"}}}}
+        env = _deep_merge(base, over)["services"]["main"]["environment"]
+        assert env == {"A": "1", "B": "3", "C": "4"}
+
+    def test_sequences_replace(self):
+        base = {"services": {"main": {"volumes": ["/a:/a"]}}}
+        over = {"services": {"main": {"volumes": ["/b:/b"]}}}
+        assert _deep_merge(base, over)["services"]["main"]["volumes"] == ["/b:/b"]
+
+    def test_new_keys_added(self):
+        base = {"services": {"main": {"image": "ubuntu"}}}
+        over = {"services": {"main": {"command": "sleep infinity"}}}
+        merged = _deep_merge(base, over)["services"]["main"]
+        assert merged["image"] == "ubuntu"
+        assert merged["command"] == "sleep infinity"
+
+    def test_new_service_added(self):
+        base = {"services": {"main": {"image": "ubuntu"}}}
+        over = {"services": {"db": {"image": "postgres"}}}
+        merged = _deep_merge(base, over)
+        assert "main" in merged["services"]
+        assert "db" in merged["services"]
+
+    def test_empty_override(self):
+        base = {"services": {"main": {"image": "ubuntu"}}}
+        assert _deep_merge(base, {}) == base
+
+    def test_empty_base(self):
+        over = {"services": {"main": {"image": "ubuntu"}}}
+        assert _deep_merge({}, over) == over
+
+
+class TestMultiFileParse:
+    """Parse multiple compose files with left-to-right merge."""
+
+    def test_two_files_merge(self, tmp_path):
+        f1 = tmp_path / "base.yaml"
+        f1.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu:22.04
+                volumes:
+                  - /data:/data
+        """))
+        f2 = tmp_path / "override.yaml"
+        f2.write_text(textwrap.dedent("""\
+            services:
+              main:
+                command: sleep infinity
+        """))
+        services, _ = _parse_compose([f1, f2], {})
+        assert services["main"].image == "ubuntu:22.04"
+        assert services["main"].command == "sleep infinity"
+        assert "/data:/data" in services["main"].volumes
+
+    def test_three_files_cascade(self, tmp_path):
+        f1 = tmp_path / "a.yaml"
+        f1.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu:20.04
+        """))
+        f2 = tmp_path / "b.yaml"
+        f2.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu:22.04
+                command: bash
+        """))
+        f3 = tmp_path / "c.yaml"
+        f3.write_text(textwrap.dedent("""\
+            services:
+              main:
+                command: sleep infinity
+        """))
+        services, _ = _parse_compose([f1, f2, f3], {})
+        assert services["main"].image == "ubuntu:22.04"
+        assert services["main"].command == "sleep infinity"
+
+    def test_variable_substitution_across_files(self, tmp_path):
+        f1 = tmp_path / "base.yaml"
+        f1.write_text(textwrap.dedent("""\
+            services:
+              main:
+                volumes:
+                  - ${HOST_PATH}:/container
+        """))
+        f2 = tmp_path / "image.yaml"
+        f2.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ${IMAGE_NAME}
+        """))
+        services, _ = _parse_compose(
+            [f1, f2], {"HOST_PATH": "/tmp/data", "IMAGE_NAME": "myimg:latest"},
+        )
+        assert services["main"].image == "myimg:latest"
+        assert "/tmp/data:/container" in services["main"].volumes
+
+    def test_single_path_still_works(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: nginx
+        """))
+        services, _ = _parse_compose(f, {})
+        assert services["app"].image == "nginx"
+
+    def test_json_compose_file(self, tmp_path):
+        """Harbor writes mounts as JSON compose files."""
+        f1 = tmp_path / "base.yaml"
+        f1.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+        """))
+        f2 = tmp_path / "mounts.json"
+        f2.write_text('{"services": {"main": {"volumes": ["/host:/container"]}}}')
+        services, _ = _parse_compose([f1, f2], {})
+        assert services["main"].image == "ubuntu"
+        assert "/host:/container" in services["main"].volumes
+
+
+class TestDeployLimits:
+    """Parse deploy.resources.limits into cpu/memory fields."""
+
+    def test_deploy_cpus(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                deploy:
+                  resources:
+                    limits:
+                      cpus: "2"
+                      memory: 4G
+        """))
+        services, _ = _parse_compose(f, {})
+        assert services["main"].cpus == "2"
+        assert services["main"].mem_limit == "4G"
+
+    def test_deploy_memory_fallback(self, tmp_path):
+        """Explicit mem_limit takes precedence over deploy limit."""
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                mem_limit: 2G
+                deploy:
+                  resources:
+                    limits:
+                      memory: 4G
+        """))
+        services, _ = _parse_compose(f, {})
+        assert services["main"].mem_limit == "2G"
+
+    def test_pull_policy_no_error(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ubuntu
+                pull_policy: build
+        """))
+        services, _ = _parse_compose(f, {})
+        assert services["main"].image == "ubuntu"
+
+    def test_deploy_with_variable_substitution(self, tmp_path):
+        f = tmp_path / "docker-compose.yml"
+        f.write_text(textwrap.dedent("""\
+            services:
+              main:
+                image: ${PREBUILT_IMAGE_NAME}
+                deploy:
+                  resources:
+                    limits:
+                      cpus: ${CPUS}
+                      memory: ${MEMORY}
+        """))
+        services, _ = _parse_compose(
+            f, {"PREBUILT_IMAGE_NAME": "myimg", "CPUS": "1", "MEMORY": "1024M"},
+        )
+        assert services["main"].image == "myimg"
+        assert services["main"].cpus == "1"
+        assert services["main"].mem_limit == "1024M"
 
 
 # ------------------------------------------------------------------ #
