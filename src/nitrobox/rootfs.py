@@ -429,13 +429,46 @@ def _extract_single_layer_locked(
         pass
 
 
+def _get_image_digest(image_name: str) -> str | None:
+    """Get the content digest of a Docker image for cache keying."""
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image_name],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().replace(":", "_")[:80]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def _get_manifest_diff_ids(
     cache_dir: Path,
     image_name: str,
 ) -> list[str] | None:
-    """Read cached manifest to get diff_ids without docker inspect."""
+    """Read cached manifest to get diff_ids without docker inspect.
+
+    Checks both digest-based and name-based manifest keys so that
+    images with different tags but identical content (e.g. different
+    compose project names) share the same cached layer set.
+    """
+    manifests_dir = cache_dir / "manifests"
+
+    # Try digest-based key first (content-addressable)
+    digest = _get_image_digest(image_name)
+    if digest:
+        digest_path = manifests_dir / f"{digest}.json"
+        if digest_path.exists():
+            try:
+                data = json.loads(digest_path.read_text())
+                return data.get("diff_ids")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Fall back to name-based key (backward compat)
     safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
-    manifest_path = cache_dir / "manifests" / f"{safe_name}.json"
+    manifest_path = manifests_dir / f"{safe_name}.json"
     if not manifest_path.exists():
         return None
     try:
@@ -450,16 +483,28 @@ def _write_manifest(
     image_name: str,
     diff_ids: list[str],
 ) -> None:
-    """Write manifest mapping image name to its layer diff_ids."""
+    """Write manifest mapping image to its layer diff_ids.
+
+    Writes under both the digest-based key and the name-based key
+    so that future lookups by either tag or digest hit the cache.
+    """
     manifests_dir = cache_dir / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
-    manifest_path = manifests_dir / f"{safe_name}.json"
-    manifest_path.write_text(json.dumps({
+
+    payload = json.dumps({
         "image": image_name,
         "diff_ids": diff_ids,
         "layers": [_safe_cache_key(did) for did in diff_ids],
-    }, indent=2))
+    }, indent=2)
+
+    # Write name-based manifest
+    safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
+    (manifests_dir / f"{safe_name}.json").write_text(payload)
+
+    # Write digest-based manifest (content-addressable)
+    digest = _get_image_digest(image_name)
+    if digest and digest != safe_name:
+        (manifests_dir / f"{digest}.json").write_text(payload)
 
 
 def _pull_or_check_local(image_name: str, cli: str | None = None) -> None:

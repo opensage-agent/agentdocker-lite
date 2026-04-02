@@ -2166,3 +2166,76 @@ class TestDigestCache:
         d2 = Sandbox._get_image_digest("alpine:latest")
         if d1 is not None and d2 is not None:
             assert d1 != d2
+
+
+class TestLayerManifestDigestCache:
+    """Tests for digest-based manifest caching in rootfs layer extraction."""
+
+    def test_manifest_written_with_digest_key(self, tmp_path):
+        """_write_manifest creates both name-based and digest-based manifest files."""
+        from nitrobox.rootfs import _write_manifest, _get_image_digest
+
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+
+        _write_manifest(cache_dir, "ubuntu:22.04", ["sha256:aaa", "sha256:bbb"])
+
+        manifests = list((cache_dir / "manifests").iterdir())
+        names = [m.name for m in manifests]
+
+        # Name-based manifest should always exist
+        assert "ubuntu_22_04.json" in names
+
+        # Digest-based manifest should exist if Docker is available
+        digest = _get_image_digest("ubuntu:22.04")
+        if digest:
+            assert f"{digest}.json" in names
+
+    def test_manifest_read_by_digest(self, tmp_path):
+        """_get_manifest_diff_ids finds manifest by digest even with different image name."""
+        import subprocess
+        from nitrobox.rootfs import _write_manifest, _get_manifest_diff_ids
+
+        # Tag ubuntu with a custom name
+        result = subprocess.run(
+            ["docker", "tag", "ubuntu:22.04", "manifest-test-custom:latest"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            pytest.skip("docker not available or ubuntu:22.04 not pulled")
+
+        try:
+            cache_dir = tmp_path / "cache"
+            cache_dir.mkdir()
+
+            # Write manifest under original name
+            diff_ids = ["sha256:layer1", "sha256:layer2"]
+            _write_manifest(cache_dir, "ubuntu:22.04", diff_ids)
+
+            # Read manifest using the custom tag (different name, same digest)
+            result = _get_manifest_diff_ids(cache_dir, "manifest-test-custom:latest")
+            assert result == diff_ids
+        finally:
+            subprocess.run(
+                ["docker", "rmi", "manifest-test-custom:latest"],
+                capture_output=True,
+            )
+
+    def test_manifest_fallback_to_name(self, tmp_path):
+        """_get_manifest_diff_ids falls back to name-based key for unknown images."""
+        from nitrobox.rootfs import _write_manifest, _get_manifest_diff_ids
+        import json
+
+        cache_dir = tmp_path / "cache"
+        manifests_dir = cache_dir / "manifests"
+        manifests_dir.mkdir(parents=True)
+
+        # Write only a name-based manifest (no digest)
+        diff_ids = ["sha256:xxx"]
+        (manifests_dir / "fake_image_v1.json").write_text(
+            json.dumps({"diff_ids": diff_ids})
+        )
+
+        # "fake/image:v1" → safe_name "fake_image_v1" matches the file
+        result = _get_manifest_diff_ids(cache_dir, "fake/image:v1")
+        assert result == diff_ids
