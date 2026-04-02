@@ -1006,12 +1006,15 @@ class TestPortMap:
         sb = Sandbox(config, name="lo-test")
         try:
             sb.run_background("python3 -m http.server 8000 --directory /tmp")
-            time.sleep(0.3)
 
             sb.write_file("/tmp/lo_check.py",
-                "import urllib.request\n"
-                "r = urllib.request.urlopen('http://127.0.0.1:8000/')\n"
-                "print(r.status)\n"
+                "import urllib.request, time\n"
+                "for _ in range(20):\n"
+                "    try:\n"
+                "        r = urllib.request.urlopen('http://127.0.0.1:8000/')\n"
+                "        print(r.status); break\n"
+                "    except Exception: time.sleep(0.3)\n"
+                "else: print('FAIL')\n"
             )
             output, ec = sb.run("python3 /tmp/lo_check.py")
             assert ec == 0
