@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -142,7 +143,9 @@ class ComposeProject:
                 raise FileNotFoundError(f"Compose file not found: {f}")
 
         self._compose_files = compose_files
-        self._project_name = project_name or compose_files[0].parent.name
+        raw_name = project_name or compose_files[0].parent.name
+        # Docker requires project/image names to be lowercase with limited chars.
+        self._project_name = re.sub(r"[^a-z0-9_-]", "-", raw_name.lower())
         self._env = {**os.environ, **(env or {})}
         self._env_base_dir = env_base_dir
         self._rootfs_cache_dir = rootfs_cache_dir

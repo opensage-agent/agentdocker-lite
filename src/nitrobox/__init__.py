@@ -9,9 +9,15 @@ from nitrobox._errors import (
 )
 from nitrobox.config import SandboxConfig
 from nitrobox.sandbox import Sandbox
-from nitrobox.checkpoint import CheckpointManager
 from nitrobox.rootfs import get_image_config
 from nitrobox.vm import QemuVM
+
+
+def __getattr__(name: str):
+    if name == "CheckpointManager":
+        from nitrobox.checkpoint import CheckpointManager
+        return CheckpointManager
+    raise AttributeError(f"module 'nitrobox' has no attribute {name!r}")
 
 try:
     from nitrobox.compose import ComposeProject, SharedNetwork
