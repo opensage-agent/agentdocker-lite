@@ -148,6 +148,12 @@ def _convert_whiteouts_in_userns(layer_dir: Path) -> None:
 
 
 
+
+# ====================================================================== #
+#  Image metadata (CLI detection, diff-IDs, config)                        #
+# ====================================================================== #
+
+
 def _container_cli() -> str | None:
     """Return 'docker' or 'podman' if available, else None."""
     import shutil
@@ -229,6 +235,12 @@ def get_image_config(image_name: str) -> dict | None:
     return get_config_from_registry(image_name)
 
 
+
+# ====================================================================== #
+#  Public API — rootfs preparation                                         #
+# ====================================================================== #
+
+
 def prepare_rootfs_layers_from_docker(
     image_name: str,
     cache_dir: Path,
@@ -305,6 +317,12 @@ def prepare_rootfs_layers_from_docker(
     _write_manifest(cache_dir, image_name, diff_ids)
     logger.info("Layer cache ready for %s: %d layers", image_name, len(layer_dirs))
     return layer_dirs
+
+
+
+# ====================================================================== #
+#  Internal — layer extraction & cache management                          #
+# ====================================================================== #
 
 
 def _extract_layers_from_registry(

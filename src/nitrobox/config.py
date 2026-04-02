@@ -265,48 +265,52 @@ class SandboxConfig:
         tmpfs: Additional tmpfs mounts as ``["/run:size=100m", ...]``.
     """
 
+    # -- Core --
     image: str = ""
     working_dir: str = "/"
     environment: dict[str, str] = field(default_factory=dict)
     volumes: list[str] = field(default_factory=list)
     devices: list[str] = field(default_factory=list)
+    tty: bool = False
+    entrypoint: list[str] | None = None  # OCI ENTRYPOINT; auto-filled from image config
+    hostname: str | None = None
+    dns: list[str] | None = None
+
+    # -- Filesystem --
     fs_backend: str = "overlayfs"
     env_base_dir: str = ""  # resolved in __post_init__
     rootfs_cache_dir: str = ""  # resolved in __post_init__
+    read_only: bool = False
+    tmpfs: list[str] = field(default_factory=list)
+    shm_size: str | None = None
+
+    # -- Resource limits (cgroup v2) --
     cpu_max: str | None = None
     memory_max: str | None = None
     pids_max: str | None = None
     io_max: str | None = None
-    tty: bool = False
+    oom_score_adj: int | None = None
+    cpuset_cpus: str | None = None
+    cpu_shares: int | None = None  # Docker compat → cpu.weight
+    memory_swap: str | None = None  # Docker compat → memory.swap.max
+    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    # -- Networking --
     net_isolate: bool = False
-    seccomp: bool = True
-    hostname: str | None = None
-    dns: list[str] | None = None
-    read_only: bool = False
     net_ns: str | None = None
     shared_userns: str | None = None
     port_map: list[str] | None = None
-    ipv6: bool = False  # pasta IPv4-only by default; localhost works.
-    # Set True for IPv6 networking (localhost may fail — use 127.0.0.1).
-    writable_paths: list[str] | None = None
-    readable_paths: list[str] | None = None
-    allowed_ports: list[int] | None = None
-    oom_score_adj: int | None = None
-    cpuset_cpus: str | None = None
-    shm_size: str | None = None
-    cpu_shares: int | None = None
-    memory_swap: str | None = None
-    tmpfs: list[str] = field(default_factory=list)
+    ipv6: bool = False  # pasta IPv4-only by default
+
+    # -- Security --
+    seccomp: bool = True
     cap_add: list[str] = field(default_factory=list)
-    ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
-    # ulimits maps resource name → (soft, hard), e.g. {"nofile": (65536, 65536)}
-    entrypoint: list[str] | None = None
-    # OCI ENTRYPOINT — runs before the shell, typically does initialization
-    # then `exec "$@"` to hand off to the shell.  Auto-filled from image
-    # config if not set explicitly.
-    vm_mode: bool = False
-    # VM mode: relaxed init for QEMU/KVM workloads.  Mounts /sys,
-    # tmpfs at /tmp+/run, skips path masking, and disables seccomp.
+    writable_paths: list[str] | None = None  # Landlock
+    readable_paths: list[str] | None = None  # Landlock
+    allowed_ports: list[int] | None = None  # Landlock
+
+    # -- Special modes --
+    vm_mode: bool = False  # Relaxed init for QEMU/KVM workloads
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:
