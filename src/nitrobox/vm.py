@@ -120,9 +120,9 @@ class QemuVM:
         self._cmd_override = cmd_override
         self._handle: str | None = None
 
-    # ------------------------------------------------------------------ #
-    #  Lifecycle                                                           #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    #  Public API — Lifecycle                                              #
+    # ================================================================== #
 
     def start(self, timeout: int = 120) -> None:
         """Start the QEMU VM and wait for QMP to be ready.
@@ -201,9 +201,9 @@ class QemuVM:
         _, is_running = self._sb.check_background(self._handle)
         return is_running
 
-    # ------------------------------------------------------------------ #
-    #  VM state (savevm / loadvm)                                          #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    #  Public API — VM state (savevm / loadvm)                             #
+    # ================================================================== #
 
     def savevm(self, tag: str) -> str:
         """Save VM state snapshot (RAM + CPU + device state).
@@ -248,27 +248,9 @@ class QemuVM:
         """List all VM state snapshots."""
         return self.hmp("info snapshots")
 
-    # ------------------------------------------------------------------ #
-    #  VM interaction                                                      #
-    # ------------------------------------------------------------------ #
-
-    def screenshot(self, path: str = "/tmp/.nbx_screenshot.ppm") -> bytes:
-        """Take a screenshot of the VM display.
-
-        Args:
-            path: Temporary file path inside the sandbox for the screenshot.
-
-        Returns:
-            Raw PPM image data as bytes.
-        """
-        self.hmp(f"screendump {path}")
-        time.sleep(0.1)
-        content = self._sb.read_file(path)
-        return content.encode("latin-1")
-
-    # ------------------------------------------------------------------ #
-    #  QMP (QEMU Monitor Protocol)                                         #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    #  Public API — QMP / HMP                                              #
+    # ================================================================== #
 
     def qmp(self, command: str, **arguments: Any) -> dict:
         """Send a QMP command and return the response.
@@ -306,309 +288,23 @@ class QemuVM:
             raise RuntimeError(f"HMP command failed: {resp['error']}")
         return resp.get("return", "")
 
-    # ------------------------------------------------------------------ #
-    #  Availability check                                                  #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def check_available(sandbox: Sandbox | None = None) -> bool:
-        """Check if QEMU/KVM is available.
+    def screenshot(self, path: str = "/tmp/.nbx_screenshot.ppm") -> bytes:
+        """Take a screenshot of the VM display.
 
         Args:
-            sandbox: If provided, also checks that ``qemu-system-x86_64``
-                is installed inside the sandbox.
+            path: Temporary file path inside the sandbox for the screenshot.
 
         Returns:
-            ``True`` if KVM device exists and is accessible.
+            Raw PPM image data as bytes.
         """
-        if not Path("/dev/kvm").exists():
-            return False
-        if not os.access("/dev/kvm", os.R_OK | os.W_OK):
-            return False
-        if sandbox is not None:
-            _, ec = sandbox.run("which qemu-system-x86_64 >/dev/null 2>&1")
-            return ec == 0
-        return True
+        self.hmp(f"screendump {path}")
+        time.sleep(0.1)
+        content = self._sb.read_file(path)
+        return content.encode("latin-1")
 
-    # ------------------------------------------------------------------ #
-    #  Internal                                                            #
-    # ------------------------------------------------------------------ #
-
-    def _build_cmd(self) -> str:
-        """Build the QEMU command line.
-
-        If *cmd_override* was provided at construction, use it verbatim
-        (only ``-qmp`` and QGA arguments are appended).  Otherwise build
-        a standard command from the disk/memory/cpus/display parameters.
-
-        QGA (Guest Agent) is always enabled via a virtio-serial channel.
-        The guest must have ``qemu-ga`` running to use :meth:`guest_exec`.
-        """
-        qmp_spec = f"unix:{self._qmp_path},server,nowait"
-        qga_chardev = f"socket,id=nbxqga,path={self._qga_path},server=on,wait=off"
-        qga_suffix = (
-            f" -chardev {qga_chardev}"
-            f" -device virtio-serial-pci,id=nbx-vser"
-            f" -device virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
-            f"name=org.qemu.guest_agent.0"
-        )
-
-        if self._cmd_override:
-            return f"{self._cmd_override} -qmp {qmp_spec}{qga_suffix}"
-
-        args = [
-            "qemu-system-x86_64",
-            "-enable-kvm",
-            "-m", self._memory,
-            "-smp", str(self._cpus),
-            "-drive", f"file={self._disk},format=qcow2,if=virtio",
-            "-qmp", qmp_spec,
-            "-chardev", qga_chardev,
-            "-device", "virtio-serial-pci,id=nbx-vser",
-            "-device", "virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
-                       "name=org.qemu.guest_agent.0",
-            "-display", self._display,
-            "-no-shutdown",
-        ]
-        args.extend(self._extra_args)
-        return " ".join(shlex.quote(a) for a in args)
-
-    def _wait_qmp(self, timeout: int) -> None:
-        """Wait for the QMP socket to appear inside the sandbox."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            _, ec = self._sb.run(
-                f"test -S {shlex.quote(self._qmp_path)}", timeout=5,
-            )
-            if ec == 0:
-                logger.debug("QMP socket ready")
-                return
-            time.sleep(0.5)
-        # Check if QEMU is still running
-        if self._handle:
-            out, running = self._sb.check_background(self._handle)
-            if not running:
-                raise RuntimeError(f"QEMU exited before QMP ready: {out}")
-        raise TimeoutError(
-            f"QMP socket not ready after {timeout}s at {self._qmp_path}"
-        )
-
-    def _resolve_host_socket(self, sandbox_path: str) -> str:
-        """Resolve a sandbox socket path to its host-accessible path.
-
-        Checks (in order): explicit override attrs, volume mounts,
-        then overlayfs host path.
-        """
-        # 1. Explicit host path override (set by caller).
-        for attr in ("_host_qmp_path", "_host_qga_path"):
-            host = getattr(self, attr, None)
-            if host and sandbox_path in host and Path(host).exists():
-                return host
-
-        # 2. Volume mounts — socket on a bind-mounted path is
-        #    directly accessible from the host.
-        for vol in self._sb._config.volumes:
-            parts = vol.split(":")
-            if len(parts) >= 2:
-                host_part, container_part = parts[0], parts[1]
-                if sandbox_path.startswith(container_part + "/") or sandbox_path == container_part:
-                    rel = sandbox_path[len(container_part):].lstrip("/")
-                    resolved = Path(host_part) / rel
-                    if resolved.exists():
-                        return str(resolved)
-
-        # 3. Overlayfs host path (upper dir / layer search).
-        host = self._sb._host_path(sandbox_path)
-        if host.exists():
-            return str(host)
-
-        raise FileNotFoundError(
-            f"Socket not accessible from host: {sandbox_path}. "
-            f"Place it on a volume mount for host-side access."
-        )
-
-    def _install_qmp_helper(self) -> None:
-        """Copy the nbx-qmp static binary into the sandbox.
-
-        Used as fallback when the QMP socket is not host-accessible
-        (e.g. on overlayfs without a volume mount).
-        """
-        vendor_dir = Path(__file__).parent / "_vendor"
-        helper_src = vendor_dir / "nbx-qmp"
-        if not helper_src.exists():
-            raise FileNotFoundError(
-                f"nbx-qmp binary not found at {helper_src}. "
-                "Rebuild: rustc --edition 2024 -C opt-level=2 -C panic=abort "
-                "-C link-arg=-nostdlib -C link-arg=-static -C strip=symbols "
-                "-o nbx-qmp rust/src/bin/nbx_qmp.rs"
-            )
-        self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
-        self._sb.run(f"chmod +x {_QMP_HELPER}")
-
-    def _qmp_exec(
-        self, command: str, arguments: dict | None = None,
-        timeout: int = 30,
-    ) -> dict:
-        """Send a QMP command.
-
-        Tries the Rust native QMP client first (host-side, no subprocess
-        overhead).  Falls back to the nbx-qmp static binary inside the
-        sandbox if the host-side socket is not reachable.
-        """
-        msg: dict[str, Any] = {"execute": command}
-        if arguments:
-            msg["arguments"] = arguments
-        msg_json = json.dumps(msg)
-
-        # Try host-side Rust binding first.
-        try:
-            host_sock = self._resolve_host_socket(self._qmp_path)
-            from nitrobox._core import py_qmp_send
-            output = py_qmp_send(host_sock, msg_json, timeout)
-            return json.loads(output)
-        except (OSError, ImportError, FileNotFoundError):
-            pass  # fall through to sandbox-side helper
-
-        # Fallback: nbx-qmp static binary inside sandbox.
-        output, ec = self._sb.run(
-            f"{_QMP_HELPER} "
-            f"{shlex.quote(self._qmp_path)} "
-            f"{shlex.quote(msg_json)}",
-            timeout=timeout,
-        )
-        if ec != 0:
-            raise RuntimeError(f"QMP command failed (ec={ec}): {output}")
-        try:
-            return json.loads(output.strip())
-        except json.JSONDecodeError:
-            raise RuntimeError(f"QMP invalid response: {output}")
-
-    # ------------------------------------------------------------------ #
-    #  QGA — connection & protocol                                         #
-    # ------------------------------------------------------------------ #
-
-    def _qga_connect(self, timeout: int = 30) -> tuple[_socket.socket, Any]:
-        """Open a QGA connection and perform the sync handshake.
-
-        Returns ``(sock, reader)``.  Caller is responsible for closing
-        both when done.
-
-        QEMU's chardev socket only supports one concurrent connection.
-        Multi-step operations (exec + poll, file open/read/close) MUST
-        use a single connection — reconnecting drops the virtio-serial
-        channel and loses buffered data.
-
-        Retries with backoff because QEMU's chardev needs time to
-        transition back to listening state after a client disconnects.
-        """
-        host_sock = self._resolve_host_socket(self._qga_path)
-        deadline = time.monotonic() + timeout
-        last_err: Exception | None = None
-
-        while time.monotonic() < deadline:
-            reader = None
-            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            sock.settimeout(min(5, max(1, deadline - time.monotonic())))
-            try:
-                sock.connect(host_sock)
-                reader = sock.makefile("rb")
-
-                # Sync handshake (QGA protocol):
-                # Send a random ID with 0xFF delimiter; QGA flushes any
-                # stale buffered data from previous connections, then
-                # echoes back the same ID.  We skip lines until we see
-                # our ID, discarding leftover messages and malformed JSON.
-                sync_id = random.randint(1, 2**31)
-                sock.sendall(
-                    b"\xff"
-                    + json.dumps({
-                        "execute": "guest-sync-delimited",
-                        "arguments": {"id": sync_id},
-                    }).encode()
-                    + b"\n"
-                )
-                while True:
-                    line = reader.readline()
-                    if not line:
-                        raise RuntimeError("QGA closed during sync")
-                    line = line.lstrip(b"\xff").strip()
-                    if not line:
-                        continue
-                    try:
-                        resp = json.loads(line)
-                        if resp.get("return") == sync_id:
-                            remaining = max(1, deadline - time.monotonic())
-                            sock.settimeout(remaining)
-                            return sock, reader
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        continue
-            except (OSError, RuntimeError, TimeoutError) as e:
-                last_err = e
-                # makefile() dups the fd — must close both to fully
-                # release the connection so QEMU can accept a new one.
-                if reader is not None:
-                    try:
-                        reader.close()
-                    except OSError:
-                        pass
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-                time.sleep(0.5)
-
-        raise OSError(
-            f"QGA connect failed after {timeout}s: {last_err}"
-        )
-
-    @staticmethod
-    def _qga_cmd(
-        sock: _socket.socket, reader: Any,
-        command: str, arguments: dict | None = None,
-    ) -> dict:
-        """Send a QGA command on an existing connection and read response."""
-        msg: dict[str, Any] = {"execute": command}
-        if arguments:
-            msg["arguments"] = arguments
-        sock.sendall(json.dumps(msg).encode() + b"\n")
-
-        while True:
-            line = reader.readline()
-            if not line:
-                raise RuntimeError("QGA closed before response")
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                resp = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                raise RuntimeError(
-                    f"QGA {command}: malformed response: {line!r}"
-                )
-            if "error" in resp:
-                raise RuntimeError(
-                    f"QGA {command}: {resp['error'].get('desc', resp['error'])}"
-                )
-            return resp
-
-    def _qga_send(
-        self, command: str, arguments: dict | None = None, timeout: int = 30,
-    ) -> dict:
-        """Send a single QGA command (connect → sync → send → read → close).
-
-        For multi-step operations, use :meth:`_qga_connect` +
-        :meth:`_qga_cmd` to reuse a single connection.
-        """
-        sock, reader = self._qga_connect(timeout)
-        try:
-            return self._qga_cmd(sock, reader, command, arguments)
-        finally:
-            reader.close()
-            sock.close()
-
-    # ------------------------------------------------------------------ #
-    #  QGA — public API                                                    #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    #  Public API — QGA (QEMU Guest Agent)                                 #
+    # ================================================================== #
 
     def guest_ping(self, timeout: int = 5) -> bool:
         """Check if the QEMU Guest Agent is responsive.
@@ -765,9 +461,317 @@ class QemuVM:
             reader.close()
             sock.close()
 
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
+    #  Public API — Availability                                           #
+    # ================================================================== #
+
+    @staticmethod
+    def check_available(sandbox: Sandbox | None = None) -> bool:
+        """Check if QEMU/KVM is available.
+
+        Args:
+            sandbox: If provided, also checks that ``qemu-system-x86_64``
+                is installed inside the sandbox.
+
+        Returns:
+            ``True`` if KVM device exists and is accessible.
+        """
+        if not Path("/dev/kvm").exists():
+            return False
+        if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+            return False
+        if sandbox is not None:
+            _, ec = sandbox.run("which qemu-system-x86_64 >/dev/null 2>&1")
+            return ec == 0
+        return True
+
+    # ================================================================== #
+    #  Internal — QEMU command line & startup                              #
+    # ================================================================== #
+
+    def _build_cmd(self) -> str:
+        """Build the QEMU command line.
+
+        If *cmd_override* was provided at construction, use it verbatim
+        (only ``-qmp`` and QGA arguments are appended).  Otherwise build
+        a standard command from the disk/memory/cpus/display parameters.
+
+        QGA (Guest Agent) is always enabled via a virtio-serial channel.
+        The guest must have ``qemu-ga`` running to use :meth:`guest_exec`.
+        """
+        qmp_spec = f"unix:{self._qmp_path},server,nowait"
+        qga_chardev = f"socket,id=nbxqga,path={self._qga_path},server=on,wait=off"
+        qga_suffix = (
+            f" -chardev {qga_chardev}"
+            f" -device virtio-serial-pci,id=nbx-vser"
+            f" -device virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
+            f"name=org.qemu.guest_agent.0"
+        )
+
+        if self._cmd_override:
+            return f"{self._cmd_override} -qmp {qmp_spec}{qga_suffix}"
+
+        args = [
+            "qemu-system-x86_64",
+            "-enable-kvm",
+            "-m", self._memory,
+            "-smp", str(self._cpus),
+            "-drive", f"file={self._disk},format=qcow2,if=virtio",
+            "-qmp", qmp_spec,
+            "-chardev", qga_chardev,
+            "-device", "virtio-serial-pci,id=nbx-vser",
+            "-device", "virtserialport,bus=nbx-vser.0,chardev=nbxqga,"
+                       "name=org.qemu.guest_agent.0",
+            "-display", self._display,
+            "-no-shutdown",
+        ]
+        args.extend(self._extra_args)
+        return " ".join(shlex.quote(a) for a in args)
+
+    def _wait_qmp(self, timeout: int) -> None:
+        """Wait for the QMP socket to appear inside the sandbox."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, ec = self._sb.run(
+                f"test -S {shlex.quote(self._qmp_path)}", timeout=5,
+            )
+            if ec == 0:
+                logger.debug("QMP socket ready")
+                return
+            time.sleep(0.5)
+        # Check if QEMU is still running
+        if self._handle:
+            out, running = self._sb.check_background(self._handle)
+            if not running:
+                raise RuntimeError(f"QEMU exited before QMP ready: {out}")
+        raise TimeoutError(
+            f"QMP socket not ready after {timeout}s at {self._qmp_path}"
+        )
+
+    def _install_qmp_helper(self) -> None:
+        """Copy the nbx-qmp static binary into the sandbox.
+
+        Used as fallback when the QMP socket is not host-accessible
+        (e.g. on overlayfs without a volume mount).
+        """
+        vendor_dir = Path(__file__).parent / "_vendor"
+        helper_src = vendor_dir / "nbx-qmp"
+        if not helper_src.exists():
+            raise FileNotFoundError(
+                f"nbx-qmp binary not found at {helper_src}. "
+                "Rebuild: rustc --edition 2024 -C opt-level=2 -C panic=abort "
+                "-C link-arg=-nostdlib -C link-arg=-static -C strip=symbols "
+                "-o nbx-qmp rust/src/bin/nbx_qmp.rs"
+            )
+        self._sb.write_file(_QMP_HELPER, helper_src.read_bytes())
+        self._sb.run(f"chmod +x {_QMP_HELPER}")
+
+    # ================================================================== #
+    #  Internal — QMP execution                                            #
+    # ================================================================== #
+
+    def _qmp_exec(
+        self, command: str, arguments: dict | None = None,
+        timeout: int = 30,
+    ) -> dict:
+        """Send a QMP command.
+
+        Tries the Rust native QMP client first (host-side, no subprocess
+        overhead).  Falls back to the nbx-qmp static binary inside the
+        sandbox if the host-side socket is not reachable.
+        """
+        msg: dict[str, Any] = {"execute": command}
+        if arguments:
+            msg["arguments"] = arguments
+        msg_json = json.dumps(msg)
+
+        # Try host-side Rust binding first.
+        try:
+            host_sock = self._resolve_host_socket(self._qmp_path)
+            from nitrobox._core import py_qmp_send
+            output = py_qmp_send(host_sock, msg_json, timeout)
+            return json.loads(output)
+        except (OSError, ImportError, FileNotFoundError):
+            pass  # fall through to sandbox-side helper
+
+        # Fallback: nbx-qmp static binary inside sandbox.
+        output, ec = self._sb.run(
+            f"{_QMP_HELPER} "
+            f"{shlex.quote(self._qmp_path)} "
+            f"{shlex.quote(msg_json)}",
+            timeout=timeout,
+        )
+        if ec != 0:
+            raise RuntimeError(f"QMP command failed (ec={ec}): {output}")
+        try:
+            return json.loads(output.strip())
+        except json.JSONDecodeError:
+            raise RuntimeError(f"QMP invalid response: {output}")
+
+    # ================================================================== #
+    #  Internal — Host socket resolution                                   #
+    # ================================================================== #
+
+    def _resolve_host_socket(self, sandbox_path: str) -> str:
+        """Resolve a sandbox socket path to its host-accessible path.
+
+        Checks (in order): explicit override attrs, volume mounts,
+        then overlayfs host path.
+        """
+        # 1. Explicit host path override (set by caller).
+        for attr in ("_host_qmp_path", "_host_qga_path"):
+            host = getattr(self, attr, None)
+            if host and sandbox_path in host and Path(host).exists():
+                return host
+
+        # 2. Volume mounts — socket on a bind-mounted path is
+        #    directly accessible from the host.
+        for vol in self._sb._config.volumes:
+            parts = vol.split(":")
+            if len(parts) >= 2:
+                host_part, container_part = parts[0], parts[1]
+                if sandbox_path.startswith(container_part + "/") or sandbox_path == container_part:
+                    rel = sandbox_path[len(container_part):].lstrip("/")
+                    resolved = Path(host_part) / rel
+                    if resolved.exists():
+                        return str(resolved)
+
+        # 3. Overlayfs host path (upper dir / layer search).
+        host = self._sb._host_path(sandbox_path)
+        if host.exists():
+            return str(host)
+
+        raise FileNotFoundError(
+            f"Socket not accessible from host: {sandbox_path}. "
+            f"Place it on a volume mount for host-side access."
+        )
+
+    # ================================================================== #
+    #  Internal — QGA protocol                                             #
+    # ================================================================== #
+
+    def _qga_connect(self, timeout: int = 30) -> tuple[_socket.socket, Any]:
+        """Open a QGA connection and perform the sync handshake.
+
+        Returns ``(sock, reader)``.  Caller is responsible for closing
+        both when done.
+
+        QEMU's chardev socket only supports one concurrent connection.
+        Multi-step operations (exec + poll, file open/read/close) MUST
+        use a single connection — reconnecting drops the virtio-serial
+        channel and loses buffered data.
+
+        Retries with backoff because QEMU's chardev needs time to
+        transition back to listening state after a client disconnects.
+        """
+        host_sock = self._resolve_host_socket(self._qga_path)
+        deadline = time.monotonic() + timeout
+        last_err: Exception | None = None
+
+        while time.monotonic() < deadline:
+            reader = None
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.settimeout(min(5, max(1, deadline - time.monotonic())))
+            try:
+                sock.connect(host_sock)
+                reader = sock.makefile("rb")
+
+                # Sync handshake (QGA protocol):
+                # Send a random ID with 0xFF delimiter; QGA flushes any
+                # stale buffered data from previous connections, then
+                # echoes back the same ID.  We skip lines until we see
+                # our ID, discarding leftover messages and malformed JSON.
+                sync_id = random.randint(1, 2**31)
+                sock.sendall(
+                    b"\xff"
+                    + json.dumps({
+                        "execute": "guest-sync-delimited",
+                        "arguments": {"id": sync_id},
+                    }).encode()
+                    + b"\n"
+                )
+                while True:
+                    line = reader.readline()
+                    if not line:
+                        raise RuntimeError("QGA closed during sync")
+                    line = line.lstrip(b"\xff").strip()
+                    if not line:
+                        continue
+                    try:
+                        resp = json.loads(line)
+                        if resp.get("return") == sync_id:
+                            remaining = max(1, deadline - time.monotonic())
+                            sock.settimeout(remaining)
+                            return sock, reader
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+            except (OSError, RuntimeError, TimeoutError) as e:
+                last_err = e
+                # makefile() dups the fd — must close both to fully
+                # release the connection so QEMU can accept a new one.
+                if reader is not None:
+                    try:
+                        reader.close()
+                    except OSError:
+                        pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                time.sleep(0.5)
+
+        raise OSError(
+            f"QGA connect failed after {timeout}s: {last_err}"
+        )
+
+    @staticmethod
+    def _qga_cmd(
+        sock: _socket.socket, reader: Any,
+        command: str, arguments: dict | None = None,
+    ) -> dict:
+        """Send a QGA command on an existing connection and read response."""
+        msg: dict[str, Any] = {"execute": command}
+        if arguments:
+            msg["arguments"] = arguments
+        sock.sendall(json.dumps(msg).encode() + b"\n")
+
+        while True:
+            line = reader.readline()
+            if not line:
+                raise RuntimeError("QGA closed before response")
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                resp = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise RuntimeError(
+                    f"QGA {command}: malformed response: {line!r}"
+                )
+            if "error" in resp:
+                raise RuntimeError(
+                    f"QGA {command}: {resp['error'].get('desc', resp['error'])}"
+                )
+            return resp
+
+    def _qga_send(
+        self, command: str, arguments: dict | None = None, timeout: int = 30,
+    ) -> dict:
+        """Send a single QGA command (connect → sync → send → read → close).
+
+        For multi-step operations, use :meth:`_qga_connect` +
+        :meth:`_qga_cmd` to reuse a single connection.
+        """
+        sock, reader = self._qga_connect(timeout)
+        try:
+            return self._qga_cmd(sock, reader, command, arguments)
+        finally:
+            reader.close()
+            sock.close()
+
+    # ================================================================== #
     #  Dunder                                                              #
-    # ------------------------------------------------------------------ #
+    # ================================================================== #
 
     def __del__(self):
         try:
