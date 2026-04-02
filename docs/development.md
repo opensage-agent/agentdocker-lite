@@ -45,8 +45,8 @@ python -m pytest tests/test_vm.py -v               # VM + QGA mock tests
 End-to-end tests that boot a real Ubuntu VM with `qemu-guest-agent` inside a nitrobox sandbox. Requires `/dev/kvm` and Docker.
 
 ```bash
-python dev/build_test_vm.py          # download Ubuntu cloud image + create seed ISO
-python dev/test_qga_integration.py   # run 28 QGA tests (first run ~20s, then ~1s via snapshot)
+python scripts/build_test_vm.py          # download Ubuntu cloud image + create seed ISO
+python scripts/test_qga_integration.py   # run 30 QGA tests (first run ~20s, then ~1s via snapshot)
 ```
 
 ## Architecture
