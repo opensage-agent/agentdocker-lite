@@ -45,9 +45,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Default socket / binary paths inside the sandbox.
+# /tmp is world-writable and overlayfs-friendly; custom paths via __init__.
 _QMP_SOCKET = "/tmp/.nbx_qmp.sock"
-_QMP_HELPER = "/tmp/.nbx_qmp"  # static binary copied into sandbox
+_QMP_HELPER = "/tmp/.nbx_qmp"  # static Rust binary copied into sandbox
 _QGA_SOCKET = "/tmp/.nbx_qga.sock"
+_QGA_CHUNK_SIZE = 65536  # 64 KB — virtio-serial file I/O chunk size
 
 
 class QemuVM:
@@ -280,9 +283,6 @@ class QemuVM:
         Raises:
             RuntimeError: Command error or not connected.
         """
-        msg: dict[str, Any] = {"execute": command}
-        if arguments:
-            msg["arguments"] = arguments
         return self._qmp_exec(command, arguments or None)
 
     def hmp(self, command: str, timeout: int = 120) -> str:
@@ -484,14 +484,14 @@ class QemuVM:
             raise RuntimeError(f"QMP invalid response: {output}")
 
     # ------------------------------------------------------------------ #
-    #  QGA (QEMU Guest Agent)                                              #
+    #  QGA — connection & protocol                                         #
     # ------------------------------------------------------------------ #
 
     def _qga_connect(self, timeout: int = 30) -> tuple[_socket.socket, Any]:
         """Open a QGA connection and perform the sync handshake.
 
-        Returns ``(socket, file_reader)``.  Caller is responsible for
-        closing both when done.
+        Returns ``(sock, reader)``.  Caller is responsible for closing
+        both when done.
 
         QEMU's chardev socket only supports one concurrent connection.
         Multi-step operations (exec + poll, file open/read/close) MUST
@@ -506,16 +506,20 @@ class QemuVM:
         last_err: Exception | None = None
 
         while time.monotonic() < deadline:
-            f = None
-            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            s.settimeout(min(5, max(1, deadline - time.monotonic())))
+            reader = None
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            sock.settimeout(min(5, max(1, deadline - time.monotonic())))
             try:
-                s.connect(host_sock)
-                f = s.makefile("rb")
+                sock.connect(host_sock)
+                reader = sock.makefile("rb")
 
-                # Sync handshake: flush any stale data on virtio-serial.
+                # Sync handshake (QGA protocol):
+                # Send a random ID with 0xFF delimiter; QGA flushes any
+                # stale buffered data from previous connections, then
+                # echoes back the same ID.  We skip lines until we see
+                # our ID, discarding leftover messages and malformed JSON.
                 sync_id = random.randint(1, 2**31)
-                s.sendall(
+                sock.sendall(
                     b"\xff"
                     + json.dumps({
                         "execute": "guest-sync-delimited",
@@ -524,7 +528,7 @@ class QemuVM:
                     + b"\n"
                 )
                 while True:
-                    line = f.readline()
+                    line = reader.readline()
                     if not line:
                         raise RuntimeError("QGA closed during sync")
                     line = line.lstrip(b"\xff").strip()
@@ -533,23 +537,22 @@ class QemuVM:
                     try:
                         resp = json.loads(line)
                         if resp.get("return") == sync_id:
-                            # Restore the full timeout now that we're synced.
                             remaining = max(1, deadline - time.monotonic())
-                            s.settimeout(remaining)
-                            return s, f
+                            sock.settimeout(remaining)
+                            return sock, reader
                     except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
             except (OSError, RuntimeError, TimeoutError) as e:
                 last_err = e
-                # Close both f and s — makefile() dups the fd, so
-                # s.close() alone leaves the socket open for QEMU.
-                if f is not None:
+                # makefile() dups the fd — must close both to fully
+                # release the connection so QEMU can accept a new one.
+                if reader is not None:
                     try:
-                        f.close()
+                        reader.close()
                     except OSError:
                         pass
                 try:
-                    s.close()
+                    sock.close()
                 except OSError:
                     pass
                 time.sleep(0.5)
@@ -560,17 +563,17 @@ class QemuVM:
 
     @staticmethod
     def _qga_cmd(
-        s: _socket.socket, f: Any,
+        sock: _socket.socket, reader: Any,
         command: str, arguments: dict | None = None,
     ) -> dict:
         """Send a QGA command on an existing connection and read response."""
         msg: dict[str, Any] = {"execute": command}
         if arguments:
             msg["arguments"] = arguments
-        s.sendall(json.dumps(msg).encode() + b"\n")
+        sock.sendall(json.dumps(msg).encode() + b"\n")
 
         while True:
-            line = f.readline()
+            line = reader.readline()
             if not line:
                 raise RuntimeError("QGA closed before response")
             line = line.strip()
@@ -596,12 +599,16 @@ class QemuVM:
         For multi-step operations, use :meth:`_qga_connect` +
         :meth:`_qga_cmd` to reuse a single connection.
         """
-        s, f = self._qga_connect(timeout)
+        sock, reader = self._qga_connect(timeout)
         try:
-            return self._qga_cmd(s, f, command, arguments)
+            return self._qga_cmd(sock, reader, command, arguments)
         finally:
-            f.close()
-            s.close()
+            reader.close()
+            sock.close()
+
+    # ------------------------------------------------------------------ #
+    #  QGA — public API                                                    #
+    # ------------------------------------------------------------------ #
 
     def guest_ping(self, timeout: int = 5) -> bool:
         """Check if the QEMU Guest Agent is responsive.
@@ -658,9 +665,9 @@ class QemuVM:
             RuntimeError: QGA communication error.
             TimeoutError: Command did not finish within *timeout*.
         """
-        s, f = self._qga_connect(timeout)
+        sock, reader = self._qga_connect(timeout)
         try:
-            resp = self._qga_cmd(s, f, "guest-exec", {
+            resp = self._qga_cmd(sock, reader, "guest-exec", {
                 "path": "/bin/bash",
                 "arg": ["-c", command],
                 "capture-output": True,
@@ -669,7 +676,8 @@ class QemuVM:
 
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                status = self._qga_cmd(s, f, "guest-exec-status", {"pid": pid})
+                status = self._qga_cmd(sock, reader, "guest-exec-status",
+                                       {"pid": pid})
                 ret = status["return"]
                 if ret["exited"]:
                     stdout = base64.b64decode(
@@ -684,8 +692,8 @@ class QemuVM:
 
             raise TimeoutError(f"guest-exec timed out after {timeout}s")
         finally:
-            f.close()
-            s.close()
+            reader.close()
+            sock.close()
 
     def guest_file_read(self, path: str) -> bytes:
         """Read a file from the VM guest filesystem.
@@ -696,17 +704,17 @@ class QemuVM:
         Returns:
             File contents as bytes.
         """
-        s, f = self._qga_connect()
+        sock, reader = self._qga_connect()
         try:
-            resp = self._qga_cmd(s, f, "guest-file-open", {
+            resp = self._qga_cmd(sock, reader, "guest-file-open", {
                 "path": path, "mode": "r",
             })
             handle = resp["return"]
             try:
                 chunks: list[bytes] = []
                 while True:
-                    resp = self._qga_cmd(s, f, "guest-file-read", {
-                        "handle": handle, "count": 65536,
+                    resp = self._qga_cmd(sock, reader, "guest-file-read", {
+                        "handle": handle, "count": _QGA_CHUNK_SIZE,
                     })
                     ret = resp["return"]
                     data = base64.b64decode(ret.get("buf-b64", ""))
@@ -716,10 +724,11 @@ class QemuVM:
                         break
                 return b"".join(chunks)
             finally:
-                self._qga_cmd(s, f, "guest-file-close", {"handle": handle})
+                self._qga_cmd(sock, reader, "guest-file-close",
+                              {"handle": handle})
         finally:
-            f.close()
-            s.close()
+            reader.close()
+            sock.close()
 
     def guest_file_write(self, path: str, data: bytes) -> None:
         """Write data to a file in the VM guest filesystem.
@@ -728,17 +737,17 @@ class QemuVM:
             path: Absolute path inside the guest.
             data: File contents to write.
         """
-        s, f = self._qga_connect()
+        sock, reader = self._qga_connect()
         try:
-            resp = self._qga_cmd(s, f, "guest-file-open", {
+            resp = self._qga_cmd(sock, reader, "guest-file-open", {
                 "path": path, "mode": "w",
             })
             handle = resp["return"]
             try:
                 offset = 0
                 while offset < len(data):
-                    chunk = data[offset:offset + 65536]
-                    resp = self._qga_cmd(s, f, "guest-file-write", {
+                    chunk = data[offset:offset + _QGA_CHUNK_SIZE]
+                    resp = self._qga_cmd(sock, reader, "guest-file-write", {
                         "handle": handle,
                         "buf-b64": base64.b64encode(chunk).decode("ascii"),
                     })
@@ -750,10 +759,11 @@ class QemuVM:
                         )
                     offset += len(chunk)
             finally:
-                self._qga_cmd(s, f, "guest-file-close", {"handle": handle})
+                self._qga_cmd(sock, reader, "guest-file-close",
+                              {"handle": handle})
         finally:
-            f.close()
-            s.close()
+            reader.close()
+            sock.close()
 
     # ------------------------------------------------------------------ #
     #  Dunder                                                              #
