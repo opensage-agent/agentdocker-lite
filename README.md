@@ -219,8 +219,8 @@ SandboxConfig(
 | `await sb.arun(cmd)` | Async version of `run()` |
 | `await sb.areset()` | Async version of `reset()` |
 | `await sb.adelete()` | Async version of `delete()` |
-| `await sb.asnapshot()` | Async version of `fs_snapshot()` |
-| `await sb.arestore()` | Async version of `fs_restore()` |
+| `await sb.asnapshot()` | Async version of `snapshot()` |
+| `await sb.arestore()` | Async version of `restore()` |
 
 ### Snapshots (RL step-wise rollback)
 
