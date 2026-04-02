@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "nitrobox-core"
-version = "0.0.5"
-dependencies = [
- "env_logger",
- "libc 1.0.0-alpha.3",
- "log",
- "nix",
- "pyo3",
- "pyo3-stub-gen",
- "rustix",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -445,6 +432,19 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
+]
+
+[[package]]
+name = "nitrobox-core"
+version = "0.0.5"
+dependencies = [
+ "env_logger",
+ "libc 1.0.0-alpha.3",
+ "log",
+ "nix",
+ "pyo3",
+ "pyo3-stub-gen",
+ "rustix",
 ]
 
 [[package]]

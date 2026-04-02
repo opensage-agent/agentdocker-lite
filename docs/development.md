@@ -24,6 +24,7 @@ The pip package bundles static binaries in `src/nitrobox/_vendor/`:
 |---|---|---|---|
 | `pasta` / `pasta.avx2` | NAT'd networking + port mapping | ~1.3MB | [passt](https://passt.top/) |
 | `criu` | Process checkpoint/restore | ~2.8MB | [seqeralabs/criu-static](https://github.com/seqeralabs/criu-static/releases) v4.2 |
+| `nbx-qmp` | QMP client (no_std Rust, raw syscalls) | ~4KB | `rust/src/bin/nbx_qmp.rs` |
 
 ### Regenerating protobuf
 
@@ -34,9 +35,18 @@ protoc --python_out=src/nitrobox/_vendor/ rpc.proto
 ## Running tests
 
 ```bash
-sudo python -m pytest tests/ -v                    # all tests
-sudo python -m pytest tests/test_checkpoint.py -v   # CRIU tests
-python -m pytest tests/test_security.py -v -k "UserNamespace"  # rootless
+python -m pytest tests/ -v                         # all tests (rootless)
+python -m pytest tests/test_checkpoint.py -v       # CRIU tests
+python -m pytest tests/test_vm.py -v               # VM + QGA mock tests
+```
+
+### QGA integration tests
+
+End-to-end tests that boot a real Ubuntu VM with `qemu-guest-agent` inside a nitrobox sandbox. Requires `/dev/kvm` and Docker.
+
+```bash
+python dev/build_test_vm.py          # download Ubuntu cloud image + create seed ISO
+python dev/test_qga_integration.py   # run 28 QGA tests (first run ~20s, then ~1s via snapshot)
 ```
 
 ## Architecture
@@ -81,5 +91,5 @@ src/nitrobox/
 │   ├── _parse.py       YAML parsing + service definitions
 │   ├── _network.py     SharedNetwork + health checks
 │   └── _project.py     ComposeProject orchestrator
-└── _vendor/            Vendored binaries (pasta, criu)
+└── _vendor/            Vendored binaries (pasta, criu, nbx-qmp)
 ```

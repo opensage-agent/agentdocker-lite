@@ -89,6 +89,12 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
 
     yield sb, str(vm_dir)
     sb.delete()
+    # Verify no leftover socket files on the volume mount.
+    for name in (".nbx_qmp.sock", ".nbx_qga.sock", ".nbx_qmp_test.sock"):
+        sock = vm_dir / name
+        if sock.exists():
+            sock.unlink()
+            pytest.fail(f"Leftover socket after sandbox delete: {sock}")
 
 
 class TestQemuVM:
@@ -286,6 +292,7 @@ class _MockQGAServer:
         self._thread = threading.Thread(target=self._serve, daemon=True)
         self.exec_output = b"mock output\n"
         self.exec_exitcode = 0
+        self.exec_never_exits = False  # for timeout testing
         self.file_content = b"mock file content"
         self._written: list[bytes] = []
 
@@ -328,11 +335,14 @@ class _MockQGAServer:
                 elif cmd == "guest-exec":
                     resp = {"return": {"pid": 42}}
                 elif cmd == "guest-exec-status":
-                    resp = {"return": {
-                        "exited": True,
-                        "exitcode": self.exec_exitcode,
-                        "out-data": base64.b64encode(self.exec_output).decode(),
-                    }}
+                    if self.exec_never_exits:
+                        resp = {"return": {"exited": False}}
+                    else:
+                        resp = {"return": {
+                            "exited": True,
+                            "exitcode": self.exec_exitcode,
+                            "out-data": base64.b64encode(self.exec_output).decode(),
+                        }}
                 elif cmd == "guest-file-open":
                     resp = {"return": 1}
                 elif cmd == "guest-file-read":
@@ -422,6 +432,30 @@ class TestQGAProtocol:
         vm, _ = mock_qga
         # Should return immediately since mock always responds
         vm.wait_guest_ready(timeout=3)
+
+    def test_guest_exec_timeout(self, mock_qga):
+        """guest_exec raises TimeoutError when command never exits."""
+        vm, server = mock_qga
+        server.exec_never_exits = True
+        with pytest.raises(TimeoutError):
+            vm.guest_exec("sleep infinity", timeout=1)
+
+    def test_guest_file_write_large(self, mock_qga):
+        """Large writes (>64KB) are chunked correctly."""
+        vm, server = mock_qga
+        data = b"x" * 100_000  # 100KB → 2 chunks (64KB + 36KB)
+        vm.guest_file_write("/tmp/large.bin", data)
+        assert server.written_data == data
+
+    def test_guest_file_read_write_roundtrip(self, mock_qga):
+        """Write then read the same data back."""
+        vm, server = mock_qga
+        payload = b"roundtrip test data\n"
+        vm.guest_file_write("/tmp/rt.txt", payload)
+        assert server.written_data == payload
+        server.file_content = payload
+        data = vm.guest_file_read("/tmp/rt.txt")
+        assert data == payload
 
     def test_build_cmd_includes_qga(self):
         """_build_cmd includes QGA chardev + virtio-serial device."""
