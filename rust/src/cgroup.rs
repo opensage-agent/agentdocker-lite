@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 const CGROUP_BASE: &str = "/sys/fs/cgroup/nitrobox";
 
 /// Check if cgroup v2 is available on this system.
+#[must_use]
 pub fn cgroup_v2_available() -> bool {
     Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
@@ -21,9 +22,8 @@ pub fn create_cgroup(name: &str) -> io::Result<PathBuf> {
 
 /// Enable required controllers on the parent cgroup.
 pub fn enable_controllers(cgroup_path: &Path, limits: &HashMap<String, String>) -> io::Result<()> {
-    let parent = match cgroup_path.parent() {
-        Some(p) => p,
-        None => return Ok(()),
+    let Some(parent) = cgroup_path.parent() else {
+        return Ok(());
     };
     let subtree_ctl = parent.join("cgroup.subtree_control");
     if !subtree_ctl.exists() {
@@ -42,20 +42,21 @@ pub fn enable_controllers(cgroup_path: &Path, limits: &HashMap<String, String>) 
 
     for (key, ctrl) in &controller_map {
         if limits.contains_key(*key) {
-            let _ = fs::write(&subtree_ctl, format!("+{}", ctrl));
+            let _ = fs::write(&subtree_ctl, format!("+{ctrl}"));
         }
     }
     Ok(())
 }
 
 /// Convert Docker CPU shares (2-262144) to cgroup v2 weight (1-10000).
+#[must_use]
 pub fn convert_cpu_shares(shares: u64) -> u64 {
     if shares == 0 {
         return 100; // default
     }
     // Docker shares range: 2-262144, default 1024
     // cgroup v2 weight range: 1-10000, default 100
-    ((shares.saturating_sub(2)) * 9999 / 262142 + 1).clamp(1, 10000)
+    ((shares.saturating_sub(2)) * 9999 / 262_142 + 1).clamp(1, 10000)
 }
 
 /// Apply resource limits to a cgroup.
@@ -83,8 +84,8 @@ pub fn apply_limits(cgroup_path: &Path, limits: &HashMap<String, String>) -> io:
 
             let file_path = cgroup_path.join(filename);
             match fs::write(&file_path, &write_value) {
-                Ok(()) => log::debug!("cgroup {} = {}", filename, write_value),
-                Err(e) => log::warn!("Failed to set cgroup {}: {}", filename, e),
+                Ok(()) => log::debug!("cgroup {filename} = {write_value}"),
+                Err(e) => log::warn!("Failed to set cgroup {filename}: {e}"),
             }
         }
     }
@@ -126,7 +127,7 @@ pub fn cleanup_cgroup(cgroup_path: &Path) -> io::Result<()> {
     // Remove the cgroup directory
     match fs::remove_dir(cgroup_path) {
         Ok(()) => {}
-        Err(e) => log::debug!("cgroup cleanup (non-fatal): {}", e),
+        Err(e) => log::debug!("cgroup cleanup (non-fatal): {e}"),
     }
     Ok(())
 }

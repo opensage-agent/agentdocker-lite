@@ -22,7 +22,7 @@ use std::io;
 pub fn nsenter_preexec(target_pid: i32) -> io::Result<()> {
     // 1. Open the target's root fd BEFORE entering mount namespace.
     //    After setns, the host's /proc may not be visible.
-    let root_path = format!("/proc/{}/root", target_pid);
+    let root_path = format!("/proc/{target_pid}/root");
     let c_root = CString::new(root_path.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let root_fd = unsafe { libc::open(c_root.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -31,7 +31,7 @@ pub fn nsenter_preexec(target_pid: i32) -> io::Result<()> {
     }
 
     // 2. Open mount namespace fd.
-    let mnt_ns = format!("/proc/{}/ns/mnt", target_pid);
+    let mnt_ns = format!("/proc/{target_pid}/ns/mnt");
     let c_mnt = CString::new(mnt_ns.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mnt_fd = unsafe { libc::open(c_mnt.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -81,7 +81,7 @@ pub fn nsenter_preexec(target_pid: i32) -> io::Result<()> {
 /// first, then enter both namespaces, then chroot to the host-side path.
 pub fn userns_preexec(target_pid: i32, rootfs: &str, working_dir: &str) -> io::Result<()> {
     // 1. Open namespace fds BEFORE entering any namespace.
-    let user_ns = format!("/proc/{}/ns/user", target_pid);
+    let user_ns = format!("/proc/{target_pid}/ns/user");
     let c_user = CString::new(user_ns.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let user_fd = unsafe { libc::open(c_user.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -89,7 +89,7 @@ pub fn userns_preexec(target_pid: i32, rootfs: &str, working_dir: &str) -> io::R
         return Err(io::Error::last_os_error());
     }
 
-    let mnt_ns = format!("/proc/{}/ns/mnt", target_pid);
+    let mnt_ns = format!("/proc/{target_pid}/ns/mnt");
     let c_mnt = CString::new(mnt_ns.as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mnt_fd = unsafe { libc::open(c_mnt.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -114,15 +114,15 @@ pub fn userns_preexec(target_pid: i32, rootfs: &str, working_dir: &str) -> io::R
     }
 
     // 4. chroot to the rootfs.
-    let c_root = CString::new(rootfs)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_root =
+        CString::new(rootfs).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if unsafe { libc::chroot(c_root.as_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
 
     // 5. chdir to working_dir.
-    let c_wd = CString::new(working_dir)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_wd =
+        CString::new(working_dir).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if unsafe { libc::chdir(c_wd.as_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }

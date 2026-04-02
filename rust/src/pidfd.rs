@@ -1,7 +1,7 @@
 //! pidfd wrappers — race-free process management via file descriptors.
 //!
-//! pidfd_open via rustix (type-safe OwnedFd), send_signal via libc (signal 0 support),
-//! process_madvise via libc (no crate wraps it).
+//! `pidfd_open` via rustix (type-safe `OwnedFd`), `send_signal` via libc (signal 0 support),
+//! `process_madvise` via libc (no crate wraps it).
 
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
@@ -17,7 +17,7 @@ pub fn pidfd_open(pid: i32) -> io::Result<RawFd> {
 }
 
 /// Send a signal to the process identified by pidfd.
-/// Uses libc because rustix::Signal doesn't support signal 0 (check alive).
+/// Uses libc because `rustix::Signal` doesn't support signal 0 (check alive).
 pub fn pidfd_send_signal(pidfd: RawFd, sig: i32) -> io::Result<()> {
     let ret = unsafe {
         libc::syscall(
@@ -36,11 +36,12 @@ pub fn pidfd_send_signal(pidfd: RawFd, sig: i32) -> io::Result<()> {
 }
 
 /// Check if the process behind the pidfd is still alive (signal 0).
+#[must_use]
 pub fn pidfd_is_alive(pidfd: RawFd) -> bool {
     pidfd_send_signal(pidfd, 0).is_ok()
 }
 
-/// Hint kernel to mark process memory as cold (MADV_COLD) via process_madvise.
+/// Hint kernel to mark process memory as cold (`MADV_COLD`) via `process_madvise`.
 /// No crate wraps this syscall.
 pub fn process_madvise_cold(pidfd: RawFd) -> io::Result<()> {
     let iov = libc::iovec {
@@ -51,7 +52,7 @@ pub fn process_madvise_cold(pidfd: RawFd) -> io::Result<()> {
         libc::syscall(
             libc::SYS_process_madvise,
             pidfd,
-            &iov as *const libc::iovec,
+            &raw const iov,
             1 as libc::c_ulong,
             libc::MADV_COLD,
             0 as libc::c_uint,

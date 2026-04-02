@@ -3,6 +3,21 @@
 //! Provides direct syscall interfaces for Linux namespace sandboxing,
 //! replacing Python ctypes/subprocess string concatenation.
 
+// Clippy pedantic: enable all, suppress lints that don't apply to internal syscall code.
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::missing_errors_doc,    // internal library, not public API docs
+    clippy::missing_panics_doc,    // same
+    clippy::cast_possible_truncation, // syscall args have known ranges
+    clippy::cast_sign_loss,        // pid_t → usize in /proc walks
+    clippy::cast_possible_wrap,    // u8 → i8 for BPF insns
+    clippy::similar_names,         // outer_uid/outer_gid is clear
+    clippy::too_many_lines,        // spawn_sandbox is complex by nature
+    clippy::struct_excessive_bools, // SandboxSpawnConfig mirrors Python config
+    clippy::implicit_hasher,       // PyO3 dictates HashMap type
+    clippy::cast_ptr_alignment,    // BPF bytecode pointer cast is intentional
+)]
+
 pub mod cgroup;
 pub mod init;
 pub mod mount;
@@ -92,32 +107,28 @@ fn py_rbind_mount(source: &str, target: &str) -> PyResult<()> {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_make_private(target: &str) -> PyResult<()> {
-    mount::make_private(target)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    mount::make_private(target).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Remount a bind mount as read-only.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_remount_ro_bind(target: &str) -> PyResult<()> {
-    mount::remount_ro_bind(target)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    mount::remount_ro_bind(target).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Lazy unmount (``umount -l``).
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_umount_lazy(target: &str) -> PyResult<()> {
-    mount::umount_lazy(target)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    mount::umount_lazy(target).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Regular unmount.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_umount(target: &str) -> PyResult<()> {
-    mount::umount(target)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    mount::umount(target).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Recursive lazy unmount (``umount -R -l``).
@@ -131,12 +142,13 @@ fn py_umount_recursive_lazy(target: &str) -> PyResult<()> {
 /// Build seccomp BPF bytecode as raw bytes.
 #[gen_stub_pyfunction]
 #[pyfunction]
+#[allow(clippy::unnecessary_wraps)] // PyO3 requires PyResult
 fn py_build_seccomp_bpf(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let bpf = security::build_seccomp_bpf();
     Ok(PyBytes::new(py, &bpf).into())
 }
 
-/// Apply seccomp-bpf filter. Raises OSError on failure.
+/// Apply seccomp-bpf filter. Raises `OSError` on failure.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_apply_seccomp_filter() -> PyResult<()> {
@@ -144,7 +156,7 @@ fn py_apply_seccomp_filter() -> PyResult<()> {
         .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
-/// Drop capabilities except Docker defaults + extra_keep.
+/// Drop capabilities except Docker defaults + `extra_keep`.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (extra_keep = None))]
@@ -200,14 +212,15 @@ fn py_pidfd_is_alive(pidfd: i32) -> bool {
     pidfd::pidfd_is_alive(pidfd)
 }
 
-/// Hint kernel to reclaim (swap out) sandbox process memory via MADV_COLD.
+/// Hint kernel to reclaim (swap out) sandbox process memory via `MADV_COLD`.
 #[gen_stub_pyfunction]
 #[pyfunction]
+#[allow(clippy::unnecessary_wraps)] // PyO3 requires PyResult
 fn py_process_madvise_cold(pidfd: i32) -> PyResult<bool> {
     match pidfd::process_madvise_cold(pidfd) {
         Ok(()) => Ok(true),
         Err(e) => {
-            log::debug!("process_madvise failed: {}", e);
+            log::debug!("process_madvise failed: {e}");
             Ok(false)
         }
     }
@@ -234,6 +247,7 @@ fn py_create_cgroup(name: &str) -> PyResult<String> {
 /// Apply resource limits to a cgroup.
 #[gen_stub_pyfunction]
 #[pyfunction]
+#[allow(clippy::needless_pass_by_value)] // PyO3 extracts HashMap by value
 fn py_apply_cgroup_limits(cgroup_path: &str, limits: HashMap<String, String>) -> PyResult<()> {
     let path = std::path::Path::new(cgroup_path);
     cgroup::enable_controllers(path, &limits)
@@ -267,7 +281,7 @@ fn py_convert_cpu_shares(shares: u64) -> u64 {
 
 // --- spawn_sandbox binding ---
 
-/// Helper: extract optional string from PyDict.
+/// Helper: extract optional string from `PyDict`.
 fn get_opt_str(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
     match d.get_item(key)? {
         Some(v) if !v.is_none() => Ok(Some(v.extract()?)),
@@ -331,7 +345,7 @@ fn get_env(d: &Bound<'_, PyDict>, key: &str) -> PyResult<HashMap<String, String>
     }
 }
 
-/// Spawn a sandbox process. Takes a config dict, returns a PySpawnResult.
+/// Spawn a sandbox process. Takes a config dict, returns a `PySpawnResult`.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
@@ -380,8 +394,8 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
         stdout_fd: r.stdout_fd,
         signal_r_fd: r.signal_r_fd,
         signal_w_fd_num: r.signal_w_fd_num,
-        master_fd: r.master_fd.map(|fd| fd as i32),
-        pidfd: r.pidfd.map(|fd| fd as i32),
+        master_fd: r.master_fd,
+        pidfd: r.pidfd,
         err_r_fd: r.err_r_fd,
     })
 }
@@ -392,7 +406,7 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
 
 /// Send a QMP command to a QEMU monitor Unix socket.
 ///
-/// Connects, negotiates capabilities, sends *command_json*, and returns
+/// Connects, negotiates capabilities, sends *`command_json`*, and returns
 /// the JSON response string (containing ``"return"`` or ``"error"``).
 ///
 /// The socket must be accessible from the calling process (i.e. on a
@@ -411,8 +425,8 @@ fn py_qmp_send(socket_path: &str, command_json: &str, timeout_secs: u64) -> PyRe
 
 /// Enter a user namespace and recursively fix permissions + ownership.
 ///
-/// Forks, ``setns()`` into the user namespace of *userns_pid*, then
-/// walks *dir_path* doing ``chmod(a+rwX)`` + ``lchown(0,0)`` so that
+/// Forks, ``setns()`` into the user namespace of *`userns_pid`*, then
+/// walks *`dir_path`* doing ``chmod(a+rwX)`` + ``lchown(0,0)`` so that
 /// the host user can ``rmtree`` the directory after sandbox deletion.
 #[gen_stub_pyfunction]
 #[pyfunction]
@@ -451,15 +465,14 @@ fn py_userns_preexec(target_pid: i32, rootfs: &str, working_dir: &str) -> PyResu
 // Process helpers (fuser)
 // ======================================================================
 
-/// Kill all processes with open fds to *target_path* (replaces ``fuser -k``).
+/// Kill all processes with open fds to *`target_path`* (replaces ``fuser -k``).
 ///
 /// Walks ``/proc/*/fd/`` and sends ``SIGKILL`` to matching PIDs.
 /// Returns the number of processes killed.
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn py_fuser_kill(target_path: &str) -> PyResult<u32> {
-    r#proc::fuser_kill(target_path)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+    r#proc::fuser_kill(target_path).map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 // ======================================================================
@@ -468,7 +481,7 @@ fn py_fuser_kill(target_path: &str) -> PyResult<u32> {
 
 /// Convert OCI `.wh.*` whiteout files to overlayfs-native format.
 ///
-/// Walks *layer_dir* and replaces sentinel files with xattrs (rootless)
+/// Walks *`layer_dir`* and replaces sentinel files with xattrs (rootless)
 /// or char-device (0,0) nodes (root).  Returns the number of files
 /// converted.  ~100x faster than the subprocess-per-file Python version.
 #[gen_stub_pyfunction]

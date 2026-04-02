@@ -34,8 +34,7 @@ fn walk_and_convert(
     count: &mut u32,
 ) -> io::Result<()> {
     // Collect entries first — we'll modify the directory during iteration.
-    let entries: Vec<_> = fs::read_dir(dir)?
-        .collect::<Result<Vec<_>, _>>()?;
+    let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
 
     for entry in &entries {
         let ft = entry.file_type()?;
@@ -61,7 +60,7 @@ fn walk_and_convert(
         } else {
             // File deletion: delete sentinel, create native whiteout.
             let target_name = &name[4..]; // strip ".wh."
-            let target_path = dir.join(&*target_name);
+            let target_path = dir.join(target_name);
             fs::remove_file(&wh_path)?;
 
             if use_user_xattr {
@@ -87,14 +86,13 @@ fn path_to_cstr(p: &Path) -> io::Result<CString> {
 
 fn set_xattr(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
     let c_path = path_to_cstr(path)?;
-    let c_name = CString::new(name)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_name = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let ret = unsafe {
         libc::setxattr(
             c_path.as_ptr(),
             c_name.as_ptr(),
-            value.as_ptr() as *const libc::c_void,
+            value.as_ptr().cast::<libc::c_void>(),
             value.len(),
             0, // flags: create or replace
         )

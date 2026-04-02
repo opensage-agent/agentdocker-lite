@@ -2,7 +2,7 @@
 //!
 //! 1. **New mount API** (kernel >= 6.8): rustix `fsopen` + `fsconfig_set_string`
 //!    with `lowerdir+` per-layer append. No length limit per layer.
-//! 2. **Legacy mount(2)** fallback via nix: single syscall, PAGE_SIZE limit.
+//! 2. **Legacy mount(2)** fallback via nix: single syscall, `PAGE_SIZE` limit.
 
 use std::io;
 use std::sync::OnceLock;
@@ -13,17 +13,15 @@ static NEW_API_SUPPORTED: OnceLock<bool> = OnceLock::new();
 
 pub fn check_new_mount_api() -> bool {
     *NEW_API_SUPPORTED.get_or_init(|| {
-        let fd = match rustix::mount::fsopen("overlay", rustix::mount::FsOpenFlags::FSOPEN_CLOEXEC)
-        {
-            Ok(fd) => fd,
-            Err(_) => return false,
+        let Ok(fd) = rustix::mount::fsopen("overlay", rustix::mount::FsOpenFlags::FSOPEN_CLOEXEC)
+        else {
+            return false;
         };
 
         // Try lowerdir+ — if kernel < 6.8, this will EINVAL
-        let supported =
-            rustix::mount::fsconfig_set_string(&fd, "lowerdir+", "/").is_ok();
+        let supported = rustix::mount::fsconfig_set_string(&fd, "lowerdir+", "/").is_ok();
 
-        log::debug!("New mount API (lowerdir+): {}", supported);
+        log::debug!("New mount API (lowerdir+): {supported}");
         supported
     })
 }
@@ -47,7 +45,11 @@ fn mount_overlay_new_api(
     rustix::mount::fsconfig_set_string(&fd, "workdir", work_dir)?;
     rustix::mount::fsconfig_create(&fd)?;
 
-    let mnt = rustix::mount::fsmount(&fd, rustix::mount::FsMountFlags::FSMOUNT_CLOEXEC, rustix::mount::MountAttrFlags::empty())?;
+    let mnt = rustix::mount::fsmount(
+        &fd,
+        rustix::mount::FsMountFlags::FSMOUNT_CLOEXEC,
+        rustix::mount::MountAttrFlags::empty(),
+    )?;
 
     rustix::mount::move_mount(
         &mnt,
@@ -68,10 +70,7 @@ fn mount_overlay_legacy(
     work_dir: &str,
     target: &str,
 ) -> io::Result<()> {
-    let options = format!(
-        "lowerdir={},upperdir={},workdir={}",
-        lowerdir_spec, upper_dir, work_dir
-    );
+    let options = format!("lowerdir={lowerdir_spec},upperdir={upper_dir},workdir={work_dir}");
 
     nix::mount::mount(
         Some("overlay"),
@@ -98,10 +97,7 @@ pub fn mount_overlay(
         match mount_overlay_new_api(&lower_dirs, upper_dir, work_dir, target) {
             Ok(()) => return Ok(()),
             Err(e) => {
-                log::warn!(
-                    "New mount API failed, falling back to legacy mount(2): {}",
-                    e
-                );
+                log::warn!("New mount API failed, falling back to legacy mount(2): {e}");
             }
         }
     }
@@ -151,7 +147,9 @@ pub fn remount_ro_bind(target: &str) -> io::Result<()> {
         None::<&str>,
         target,
         None::<&str>,
-        nix::mount::MsFlags::MS_REMOUNT | nix::mount::MsFlags::MS_RDONLY | nix::mount::MsFlags::MS_BIND,
+        nix::mount::MsFlags::MS_REMOUNT
+            | nix::mount::MsFlags::MS_RDONLY
+            | nix::mount::MsFlags::MS_BIND,
         None::<&str>,
     )
     .map_err(|e| io::Error::from_raw_os_error(e as i32))
@@ -191,7 +189,7 @@ pub fn umount_recursive_lazy(target: &str) -> io::Result<()> {
     }
 
     // Sort by length descending (deepest first).
-    sub_mounts.sort_by(|a, b| b.len().cmp(&a.len()));
+    sub_mounts.sort_by_key(|m| std::cmp::Reverse(m.len()));
 
     for mp in &sub_mounts {
         let _ = nix::mount::umount2(mp.as_str(), nix::mount::MntFlags::MNT_DETACH);

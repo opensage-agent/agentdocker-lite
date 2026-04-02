@@ -12,31 +12,22 @@ use std::path::Path;
 /// every PID whose fd links to the target.  Returns the number of
 /// processes killed.
 pub fn fuser_kill(target_path: &str) -> io::Result<u32> {
-    let target = match fs::canonicalize(target_path) {
-        Ok(p) => p,
-        Err(_) => Path::new(target_path).to_path_buf(),
-    };
+    let target =
+        fs::canonicalize(target_path).unwrap_or_else(|_| Path::new(target_path).to_path_buf());
 
     let my_pid = unsafe { libc::getpid() };
     let mut killed = 0u32;
 
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
+    let proc_dir = fs::read_dir("/proc")?;
 
     for entry in proc_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
 
         // Only numeric directories (PIDs).
         let name = entry.file_name();
         let pid_str = name.to_string_lossy();
-        let pid: i32 = match pid_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
+        let Ok(pid) = pid_str.parse::<i32>() else {
+            continue;
         };
 
         // Skip self.
@@ -44,31 +35,24 @@ pub fn fuser_kill(target_path: &str) -> io::Result<u32> {
             continue;
         }
 
-        let fd_dir = format!("/proc/{}/fd", pid);
-        let fds = match fs::read_dir(&fd_dir) {
-            Ok(d) => d,
-            Err(_) => continue, // permission denied or gone
+        let fd_dir = format!("/proc/{pid}/fd");
+        let Ok(fds) = fs::read_dir(&fd_dir) else {
+            continue;
         };
 
         let mut should_kill = false;
         for fd_entry in fds {
-            let fd_entry = match fd_entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            match fs::read_link(fd_entry.path()) {
-                Ok(link_target) if link_target == target => {
+            let Ok(fd_entry) = fd_entry else { continue };
+            if let Ok(link_target) = fs::read_link(fd_entry.path()) {
+                if link_target == target {
                     should_kill = true;
                     break;
                 }
-                _ => continue,
             }
         }
 
-        if should_kill {
-            if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
-                killed += 1;
-            }
+        if should_kill && unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+            killed += 1;
         }
     }
 

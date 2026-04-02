@@ -3,7 +3,7 @@
 //! Connects to a QEMU QMP Unix socket, negotiates capabilities,
 //! sends a JSON command, and returns the response.  Host-side
 //! native Rust implementation callable directly from Python via
-//! PyO3.  Guest-side command execution uses QGA (QEMU Guest Agent)
+//! `PyO3`.  Guest-side command execution uses QGA (QEMU Guest Agent)
 //! via `vm.py`, not this module.
 
 use std::io::{self, BufRead, BufReader, Write};

@@ -22,7 +22,7 @@ use std::path::Path;
 /// Returns the number of entries processed.
 pub fn fixup_dir_for_delete(userns_pid: i32, dir_path: &Path) -> io::Result<u32> {
     // Open the user namespace fd before forking.
-    let ns_path = format!("/proc/{}/ns/user", userns_pid);
+    let ns_path = format!("/proc/{userns_pid}/ns/user");
     let ns_fd = {
         let c_path = CString::new(ns_path.as_bytes())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -49,11 +49,8 @@ pub fn fixup_dir_for_delete(userns_pid: i32, dir_path: &Path) -> io::Result<u32>
         unsafe { libc::close(ns_fd) };
 
         // Walk and fixup.
-        let count = match walk_fixup(dir_path) {
-            Ok(n) => n,
-            Err(_) => {
-                unsafe { libc::_exit(2) };
-            }
+        let Ok(count) = walk_fixup(dir_path) else {
+            unsafe { libc::_exit(2) };
         };
 
         // Write count to stdout so parent can read it (optional).
@@ -66,7 +63,7 @@ pub fn fixup_dir_for_delete(userns_pid: i32, dir_path: &Path) -> io::Result<u32>
     unsafe { libc::close(ns_fd) };
 
     let mut status: libc::c_int = 0;
-    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    let ret = unsafe { libc::waitpid(pid, &raw mut status, 0) };
     if ret < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -74,10 +71,9 @@ pub fn fixup_dir_for_delete(userns_pid: i32, dir_path: &Path) -> io::Result<u32>
     if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
         Ok(0) // Can't easily return count across fork; 0 = success
     } else {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("userns fixup child exited with status {}", status),
-        ))
+        Err(io::Error::other(format!(
+            "userns fixup child exited with status {status}"
+        )))
     }
 }
 
@@ -88,28 +84,19 @@ fn walk_fixup(dir: &Path) -> io::Result<u32> {
     fixup_entry(dir)?;
     count += 1;
 
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(count), // Can't read — skip
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(count); // Can't read — skip
     };
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let Ok(entry) = entry else { continue };
         let path = entry.path();
-        let ft = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
+        let Ok(ft) = entry.file_type() else { continue };
 
         if ft.is_dir() {
             count += walk_fixup(&path).unwrap_or(0);
-        } else {
-            if fixup_entry(&path).is_ok() {
-                count += 1;
-            }
+        } else if fixup_entry(&path).is_ok() {
+            count += 1;
         }
     }
     Ok(count)
@@ -126,7 +113,7 @@ fn fixup_entry(path: &Path) -> io::Result<()> {
     // chmod: dirs get 0o777, files get 0o666.
     // Use stat to check type, don't follow symlinks for chmod.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::lstat(c_path.as_ptr(), &mut st) } == 0 {
+    if unsafe { libc::lstat(c_path.as_ptr(), &raw mut st) } == 0 {
         let mode = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
             0o777
         } else {
