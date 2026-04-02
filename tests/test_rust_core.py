@@ -160,6 +160,37 @@ class TestRecursiveUmount:
         # After recursive unmount, mounts are gone.
         assert not (base / "a.txt").exists()
 
+    def test_recursive_unmount_deep_nesting(self, tmp_path):
+        """Recursive unmount handles 4 levels of nested mounts."""
+        _requires_root()
+
+        dirs = []
+        for i in range(4):
+            d = tmp_path / f"src{i}"
+            d.mkdir()
+            (d / f"level{i}.txt").write_text(str(i))
+            dirs.append(d)
+
+        base = tmp_path / "base"
+        base.mkdir()
+
+        # Mount level 0 at base
+        py_bind_mount(str(dirs[0]), str(base))
+        # Create nested dirs inside mount and mount deeper
+        for i in range(1, 4):
+            nested = base / "/".join(f"d{j}" for j in range(1, i + 1))
+            nested.mkdir(parents=True, exist_ok=True)
+            py_bind_mount(str(dirs[i]), str(nested))
+
+        # Verify deepest level
+        deep = base / "d1/d2/d3"
+        assert (deep / "level3.txt").read_text() == "3"
+
+        py_umount_recursive_lazy(str(base))
+
+        # All mounts gone
+        assert not (base / "level0.txt").exists()
+
 
 # ================================================================== #
 #  Namespace enter (preexec helpers)                                   #
@@ -210,14 +241,29 @@ class TestNsenterPreexec:
             py_umount_lazy(str(rootfs))
 
 
-class TestUsernsPopen:
-    """userns preexec is tested indirectly via test_security.py::TestUserNamespace::test_popen.
+class TestNsenterErrors:
+    """Error paths for nsenter preexec helpers."""
 
-    Here we verify the binding is callable and rejects invalid PIDs.
-    """
+    def test_nsenter_dead_pid_raises(self):
+        """nsenter_preexec with a dead process raises OSError."""
+        _requires_root()
+        # Fork and immediately reap so PID is gone.
+        pid = os.fork()
+        if pid == 0:
+            os._exit(0)
+        os.waitpid(pid, 0)
 
-    def test_invalid_pid_raises(self):
-        """Invalid target PID raises OSError."""
+        with pytest.raises(OSError):
+            py_nsenter_preexec(pid)
+
+    def test_nsenter_invalid_pid_raises(self):
+        """nsenter_preexec with a nonexistent PID raises OSError."""
+        _requires_root()
+        with pytest.raises(OSError):
+            py_nsenter_preexec(999999999)
+
+    def test_userns_preexec_invalid_pid_raises(self):
+        """userns_preexec with a nonexistent PID raises OSError."""
         with pytest.raises(OSError):
             py_userns_preexec(999999999, "/", "/")
 
@@ -284,6 +330,49 @@ class TestFuserKill:
         """Nonexistent path doesn't crash, returns 0."""
         killed = py_fuser_kill("/tmp/.nitrobox_nonexistent_fuser_test")
         assert killed == 0
+
+    def test_kills_multiple_holders(self, tmp_path):
+        """Multiple processes holding the same file all get killed."""
+        target = tmp_path / "shared_file"
+        target.touch()
+
+        pids = []
+        for _ in range(3):
+            pid = os.fork()
+            if pid == 0:
+                fd = os.open(str(target), os.O_RDONLY)
+                try:
+                    time.sleep(300)
+                except:
+                    pass
+                os._exit(0)
+            pids.append(pid)
+
+        try:
+            time.sleep(0.2)  # Let all children open the file.
+
+            killed = py_fuser_kill(str(target))
+            assert killed >= 3
+
+            # Reap all children.
+            for pid in pids:
+                for _ in range(50):
+                    wpid, status = os.waitpid(pid, os.WNOHANG)
+                    if wpid != 0:
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail(f"Child {pid} not killed")
+        finally:
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
 
     def test_does_not_kill_self(self, tmp_path):
         """fuser_kill skips current process even if it holds the fd."""
