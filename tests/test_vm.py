@@ -218,6 +218,29 @@ class TestQemuVM:
         cmd = vm._build_cmd()
         assert "-qmp unix:/storage/.qmp.sock,server,nowait" in cmd
 
+    def test_cmd_override_start_stop(self, vm_sandbox):
+        """cmd_override with QMP socket on volume mount works end-to-end."""
+        sb, vm_dir = vm_sandbox
+        override = (
+            "qemu-system-x86_64 -enable-kvm -m 128M -smp 1"
+            " -drive file=/vm/test.qcow2,format=qcow2,if=virtio"
+            " -display none -no-shutdown"
+        )
+        # QMP socket on volume mount — exercises the sb.run() write path
+        # for the launch script (not write_file, which fails on volumes).
+        vm = QemuVM(sb, cmd_override=override, qmp_socket="/vm/.qmp_override.sock")
+        vm.start(timeout=30)
+        try:
+            assert vm.running
+            resp = vm.qmp("query-status")
+            assert resp["return"]["status"] == "running"
+        finally:
+            vm.stop()
+        assert not vm.running
+        # Socket should be cleaned up by stop()
+        assert not (Path(vm_dir) / ".qmp_override.sock").exists(), \
+            "QMP socket not cleaned up after stop()"
+
     def test_repr(self, vm_sandbox):
         """repr shows useful info."""
         sb, _ = vm_sandbox
@@ -294,6 +317,7 @@ class _MockQGAServer:
         self.exec_exitcode = 0
         self.exec_never_exits = False  # for timeout testing
         self.file_content = b"mock file content"
+        self._file_read_offset = 0  # tracks position for chunked reads
         self._written: list[bytes] = []
 
     def start(self):
@@ -344,12 +368,17 @@ class _MockQGAServer:
                             "out-data": base64.b64encode(self.exec_output).decode(),
                         }}
                 elif cmd == "guest-file-open":
+                    self._file_read_offset = 0
                     resp = {"return": 1}
                 elif cmd == "guest-file-read":
+                    count = args.get("count", 65536)
+                    chunk = self.file_content[self._file_read_offset:self._file_read_offset + count]
+                    self._file_read_offset += len(chunk)
+                    eof = self._file_read_offset >= len(self.file_content)
                     resp = {"return": {
-                        "count": len(self.file_content),
-                        "buf-b64": base64.b64encode(self.file_content).decode(),
-                        "eof": True,
+                        "count": len(chunk),
+                        "buf-b64": base64.b64encode(chunk).decode(),
+                        "eof": eof,
                     }}
                 elif cmd == "guest-file-write":
                     data = base64.b64decode(args.get("buf-b64", ""))
@@ -446,6 +475,14 @@ class TestQGAProtocol:
         data = b"x" * 100_000  # 100KB → 2 chunks (64KB + 36KB)
         vm.guest_file_write("/tmp/large.bin", data)
         assert server.written_data == data
+
+    def test_guest_file_read_large(self, mock_qga):
+        """Large reads (>64KB) are chunked correctly."""
+        vm, server = mock_qga
+        server.file_content = b"A" * 100_000  # 100KB → multiple read chunks
+        data = vm.guest_file_read("/tmp/large.bin")
+        assert data == server.file_content
+        assert len(data) == 100_000
 
     def test_guest_file_read_write_roundtrip(self, mock_qga):
         """Write then read the same data back."""
