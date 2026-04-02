@@ -113,9 +113,11 @@ class ComposeProject:
     service names to ``127.0.0.1``.
 
     Args:
-        compose_file: Path to ``docker-compose.yml``.
+        compose_file: Path (or list of paths) to ``docker-compose.yml``
+            file(s).  When multiple files are given they are merged
+            left-to-right, mirroring ``docker compose -f a.yaml -f b.yaml``.
         project_name: Project name (used as sandbox name prefix).
-            Defaults to the parent directory name of the compose file.
+            Defaults to the parent directory name of the first compose file.
         env: Environment variables for ``${VAR:-default}`` substitution.
         env_base_dir: Base directory for sandbox state.
         rootfs_cache_dir: Directory to cache rootfs images.
@@ -123,24 +125,30 @@ class ComposeProject:
 
     def __init__(
         self,
-        compose_file: str | Path,
+        compose_file: str | Path | list[str | Path],
         *,
         project_name: str | None = None,
         env: dict[str, str] | None = None,
         env_base_dir: str | None = None,
         rootfs_cache_dir: str | None = None,
     ) -> None:
-        self._compose_file = Path(compose_file).resolve()
-        if not self._compose_file.exists():
-            raise FileNotFoundError(f"Compose file not found: {self._compose_file}")
+        if isinstance(compose_file, (str, Path)):
+            compose_files = [Path(compose_file).resolve()]
+        else:
+            compose_files = [Path(f).resolve() for f in compose_file]
 
-        self._project_name = project_name or self._compose_file.parent.name
+        for f in compose_files:
+            if not f.exists():
+                raise FileNotFoundError(f"Compose file not found: {f}")
+
+        self._compose_files = compose_files
+        self._project_name = project_name or compose_files[0].parent.name
         self._env = {**os.environ, **(env or {})}
         self._env_base_dir = env_base_dir
         self._rootfs_cache_dir = rootfs_cache_dir
 
         self._defs, self._named_volumes = _parse_compose(
-            self._compose_file, self._env,
+            compose_files, self._env,
         )
         self._startup_order = _topo_sort(self._defs)
         self._image_map = self._resolve_image_map()
@@ -325,7 +333,7 @@ class ComposeProject:
         if not mapping:
             # Fallback: use image fields from our own parser.
             # For build-only services, infer {project}-{service} name.
-            project = self._project_name or self._compose_file.parent.name
+            project = self._project_name or self._compose_files[0].parent.name
             fallback = {}
             for name, svc in self._defs.items():
                 if svc.image:
@@ -343,11 +351,11 @@ class ComposeProject:
         ]
         if missing:
             logger.info("Building missing images for: %s", ", ".join(missing))
-            build_cmd = [
-                "docker", "compose",
-                "-f", str(self._compose_file),
-                "build",
-            ] + missing
+            build_cmd = ["docker", "compose"]
+            for f in self._compose_files:
+                build_cmd.extend(["-f", str(f)])
+            build_cmd.append("build")
+            build_cmd.extend(missing)
             if self._project_name:
                 build_cmd[2:2] = ["-p", self._project_name]
             subprocess.run(
@@ -359,11 +367,10 @@ class ComposeProject:
 
     def _query_compose_config(self) -> dict[str, str]:
         """Run ``docker compose config --format json`` and parse results."""
-        cmd = [
-            "docker", "compose",
-            "-f", str(self._compose_file),
-            "config", "--format", "json",
-        ]
+        cmd = ["docker", "compose"]
+        for f in self._compose_files:
+            cmd.extend(["-f", str(f)])
+        cmd.extend(["config", "--format", "json"])
         if self._project_name:
             cmd[2:2] = ["-p", self._project_name]
         try:
@@ -416,7 +423,7 @@ class ComposeProject:
     def _resolve_volumes(self, svc: _Service) -> list[str]:
         """Resolve volume specs, mapping named volumes to host dirs."""
         result: list[str] = []
-        compose_dir = self._compose_file.parent
+        compose_dir = self._compose_files[0].parent
 
         for vol in svc.volumes:
             parts = vol.split(":")
@@ -518,6 +525,8 @@ class ComposeProject:
             config_kwargs["shm_size"] = svc.shm_size
         if svc.tmpfs:
             config_kwargs["tmpfs"] = svc.tmpfs
+        if svc.cpus:
+            config_kwargs["cpu_max"] = svc.cpus
         if svc.cpu_shares:
             config_kwargs["cpu_shares"] = svc.cpu_shares
         if svc.mem_limit:

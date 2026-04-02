@@ -85,6 +85,7 @@ class _Service:
     # compose networks this service belongs to (empty → "default")
     shm_size: str | None = None
     tmpfs: list[str] = field(default_factory=list)
+    cpus: str | None = None  # deploy.resources.limits.cpus
     cpu_shares: int | None = None
     mem_limit: str | None = None
     memswap_limit: str | None = None
@@ -177,6 +178,9 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "init", "user", "pid", "ipc",
     # Not needed: host networking replaces custom networks
     "networks",
+    # Docker Compose fields parsed for compatibility but mapped to
+    # nitrobox equivalents where possible (deploy → cpu/memory limits)
+    "deploy", "pull_policy",
 })
 
 
@@ -210,18 +214,45 @@ def _parse_env_file(filepath: Path) -> dict[str, str]:
     return env
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep-merge *override* into *base* following docker compose rules.
+
+    Mappings are recursively merged; scalars and sequences in *override*
+    replace those in *base*.
+    """
+    merged = dict(base)
+    for key, val in override.items():
+        if (
+            key in merged
+            and isinstance(merged[key], dict)
+            and isinstance(val, dict)
+        ):
+            merged[key] = _deep_merge(merged[key], val)
+        else:
+            merged[key] = val
+    return merged
+
+
 def _parse_compose(
-    compose_file: Path,
+    compose_file: Path | list[Path],
     env: dict[str, str],
 ) -> tuple[dict[str, _Service], list[str]]:
-    """Parse a docker-compose.yml and return (services, named_volumes).
+    """Parse one or more docker-compose files and return (services, named_volumes).
+
+    When *compose_file* is a list, files are merged left-to-right following
+    ``docker compose -f a.yaml -f b.yaml`` semantics (later files override
+    earlier ones).
 
     Warns on unsupported service-level fields.
     """
-    text = compose_file.read_text()
-    # Substitute variables in the raw YAML text
-    text = _substitute(text, env)
-    data = yaml.safe_load(text) or {}
+    files = [compose_file] if isinstance(compose_file, Path) else compose_file
+
+    data: dict = {}
+    for f in files:
+        text = Path(f).read_text()
+        text = _substitute(text, env)
+        layer = yaml.safe_load(text) or {}
+        data = _deep_merge(data, layer)
 
     services_raw = data.get("services", {})
     named_volumes = list((data.get("volumes") or {}).keys())
@@ -246,9 +277,17 @@ def _parse_compose(
         if raw_env_file:
             if isinstance(raw_env_file, str):
                 raw_env_file = [raw_env_file]
+            # Use the first compose file's parent as base for env_file paths
+            base_dir = (files[0] if isinstance(files, list) else files).parent
             for ef in raw_env_file:
-                env_from_file.update(_parse_env_file(compose_file.parent / ef))
+                env_from_file.update(_parse_env_file(base_dir / ef))
         merged_env = {**env_from_file, **_parse_environment(svc.get("environment"))}
+
+        # Extract resource limits from deploy.resources.limits (docker compose v3)
+        deploy = svc.get("deploy") or {}
+        deploy_limits = (deploy.get("resources") or {}).get("limits") or {}
+        deploy_cpus = deploy_limits.get("cpus")
+        deploy_memory = deploy_limits.get("memory")
 
         # Parse tmpfs: can be string or list
         raw_tmpfs = svc.get("tmpfs")
@@ -283,8 +322,9 @@ def _parse_compose(
             networks=list(svc["networks"]) if isinstance(svc.get("networks"), (list, dict)) else [],
             shm_size=svc.get("shm_size"),
             tmpfs=tmpfs_list,
+            cpus=str(deploy_cpus) if deploy_cpus else None,
             cpu_shares=int(svc["cpu_shares"]) if svc.get("cpu_shares") else None,
-            mem_limit=svc.get("mem_limit"),
+            mem_limit=svc.get("mem_limit") or (str(deploy_memory) if deploy_memory else None),
             memswap_limit=svc.get("memswap_limit"),
             extra_hosts=[str(h) for h in (svc.get("extra_hosts") or [])],
             sysctls={str(k): str(v) for k, v in (svc.get("sysctls") or {}).items()},
