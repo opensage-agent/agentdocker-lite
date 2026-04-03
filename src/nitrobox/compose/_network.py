@@ -95,13 +95,13 @@ class SharedNetwork:
                     ["newuidmap", str(pid),
                      "0", str(outer_uid), "1",
                      "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True,
+                    check=True, capture_output=True, timeout=10,
                 )
                 subprocess.run(
                     ["newgidmap", str(pid),
                      "0", str(outer_gid), "1",
                      "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True,
+                    check=True, capture_output=True, timeout=10,
                 )
 
             # Attach pasta for NAT + DNS (like Docker Compose default networking)
@@ -142,7 +142,7 @@ class SharedNetwork:
             str(pid),
         ])
 
-        out = subprocess.run(cmd, capture_output=True, text=True)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if out.returncode != 0:
             logger.warning(
                 "pasta failed (exit=%d): %s — shared network will have no internet",

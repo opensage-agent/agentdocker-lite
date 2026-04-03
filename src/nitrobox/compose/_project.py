@@ -571,8 +571,8 @@ class ComposeProject:
                 f"rm -rf /etc/hosts 2>/dev/null; printf '{content}' > /etc/hosts",
                 timeout=5,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to write /etc/hosts for %s: %s", sb._name, exc)
 
     @staticmethod
     def _write_resolv(sb: Sandbox, nameservers: list[str]) -> None:
@@ -590,8 +590,8 @@ class ComposeProject:
                 f"rm -rf /etc/resolv.conf 2>/dev/null; printf '{content}' > /etc/resolv.conf",
                 timeout=5,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to write /etc/resolv.conf for %s: %s", sb._name, exc)
 
     @staticmethod
     def _apply_sysctls(sb: Sandbox, svc: _Service) -> None:

@@ -10,10 +10,64 @@ import os
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import TypedDict
 
 from nitrobox.docker_api import get_client
 
 logger = logging.getLogger(__name__)
+
+
+# ====================================================================== #
+#  Image config type + parsing helpers                                     #
+# ====================================================================== #
+
+
+class ImageConfig(TypedDict, total=False):
+    """OCI/Docker image configuration.
+
+    Used as the canonical format throughout nitrobox for image metadata.
+    Produced by :func:`get_image_config`, persisted in the manifest
+    cache, and consumed by :func:`_apply_image_defaults`.
+    """
+    cmd: list[str] | None
+    entrypoint: list[str] | None
+    env: dict[str, str]
+    working_dir: str | None
+    exposed_ports: list[int]
+    diff_ids: list[str]
+
+
+def _parse_docker_env(env_list: list[str] | None) -> dict[str, str]:
+    """Convert Docker ``Env`` list (``["K=V", ...]``) to dict."""
+    result: dict[str, str] = {}
+    for entry in env_list or []:
+        key, _, value = entry.partition("=")
+        result[key] = value
+    return result
+
+
+def _parse_docker_ports(exposed_ports: dict | None) -> list[int]:
+    """Convert Docker ``ExposedPorts`` (``{"8080/tcp": {}, ...}``) to ``[8080, ...]``."""
+    result: list[int] = []
+    for port_proto in exposed_ports or {}:
+        try:
+            result.append(int(port_proto.split("/")[0]))
+        except (ValueError, IndexError):
+            pass
+    return result
+
+
+def _docker_inspect_to_config(info: dict) -> ImageConfig:
+    """Convert a Docker API ``/images/{id}/json`` response to :class:`ImageConfig`."""
+    config = info.get("Config") or {}
+    return ImageConfig(
+        cmd=config.get("Cmd"),
+        entrypoint=config.get("Entrypoint"),
+        env=_parse_docker_env(config.get("Env")),
+        working_dir=config.get("WorkingDir") or None,
+        exposed_ports=_parse_docker_ports(config.get("ExposedPorts")),
+        diff_ids=info.get("RootFS", {}).get("Layers", []),
+    )
 
 
 # ====================================================================== #
@@ -116,7 +170,7 @@ def _convert_whiteouts_in_userns(layer_dir: Path) -> None:
     result = subprocess.run(
         ["unshare", "--user", "--map-root-user",
          "python3", "-c", script, str(layer_dir)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         logger.warning("userns whiteout conversion failed: %s", result.stderr.strip())
@@ -151,7 +205,7 @@ def _get_image_diff_ids(image_name: str) -> list[str]:
     try:
         metadata = get_image_metadata_from_registry(image_name)
         if metadata.get("diff_ids"):
-            _image_store_populate_from_config(image_name, metadata)
+            _image_store_populate(image_name, metadata)
             return metadata["diff_ids"]
     except Exception as exc:
         errors.append(("registry", exc))
@@ -159,9 +213,10 @@ def _get_image_diff_ids(image_name: str) -> list[str]:
     # 3. Docker API — for locally-built images not on any registry
     try:
         info = get_client().image_inspect(image_name)
-        diff_ids = info.get("RootFS", {}).get("Layers")
+        config = _docker_inspect_to_config(info)
+        diff_ids = config.get("diff_ids")
         if diff_ids:
-            _image_store_populate(image_name, info)
+            _image_store_populate(image_name, config)
             return diff_ids
     except Exception as exc:
         errors.append(("docker", exc))
@@ -193,14 +248,14 @@ def get_image_config(image_name: str) -> dict | None:
     # 2. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
     disk_cfg = _read_config_from_manifest_cache(image_name)
     if disk_cfg is not None:
-        _image_store_populate_from_config(image_name, disk_cfg)
+        _image_store_populate(image_name, disk_cfg)
         return disk_cfg
 
     # 3. Registry API — single call for diff_ids + config (~100ms)
     from nitrobox._registry import get_image_metadata_from_registry
     try:
         metadata = get_image_metadata_from_registry(image_name)
-        _image_store_populate_from_config(image_name, metadata)
+        _image_store_populate(image_name, metadata)
         return metadata
     except Exception:
         pass
@@ -208,30 +263,8 @@ def get_image_config(image_name: str) -> dict | None:
     # 4. Docker API — for locally-built images not on any registry
     try:
         info = get_client().image_inspect(image_name)
-        config = info.get("Config") or {}
-
-        env_dict: dict[str, str] = {}
-        for entry in config.get("Env") or []:
-            key, _, value = entry.partition("=")
-            env_dict[key] = value
-
-        ports: list[int] = []
-        for port_proto in config.get("ExposedPorts") or {}:
-            port_str = port_proto.split("/")[0]
-            try:
-                ports.append(int(port_str))
-            except ValueError:
-                pass
-
-        result = {
-            "cmd": config.get("Cmd"),
-            "entrypoint": config.get("Entrypoint"),
-            "env": env_dict,
-            "working_dir": config.get("WorkingDir") or None,
-            "exposed_ports": ports,
-        }
-
-        _image_store_populate(image_name, info)
+        result = _docker_inspect_to_config(info)
+        _image_store_populate(image_name, result)
         return result
     except Exception:
         pass
@@ -280,67 +313,32 @@ def _default_rootfs_cache_dir() -> Path | None:
 
 # -- ImageStore helpers ------------------------------------------------ #
 
-def _image_store_get(image_name: str) -> dict | None:
+def _image_store_get(image_name: str) -> ImageConfig | None:
     """Look up image config in Rust in-memory store."""
     try:
         from nitrobox._core import py_image_store_get
         raw = py_image_store_get(image_name)
         if raw is None:
             return None
-        import json as _json
-        data = _json.loads(raw)
-        return {
-            "cmd": data.get("cmd"),
-            "entrypoint": data.get("entrypoint"),
-            "env": data.get("env", {}),
-            "working_dir": data.get("working_dir"),
-            "exposed_ports": data.get("exposed_ports", []),
-            "diff_ids": data.get("diff_ids", []),
-        }
-    except Exception:
+        data = json.loads(raw)
+        return ImageConfig(
+            cmd=data.get("cmd"),
+            entrypoint=data.get("entrypoint"),
+            env=data.get("env", {}),
+            working_dir=data.get("working_dir"),
+            exposed_ports=data.get("exposed_ports", []),
+            diff_ids=data.get("diff_ids", []),
+        )
+    except Exception as exc:
+        logger.debug("ImageStore lookup failed for %s: %s", image_name, exc)
         return None
 
 
-def _image_store_populate(image_name: str, docker_info: dict) -> None:
-    """Populate Rust ImageStore from a Docker API inspect result."""
+def _image_store_populate(image_name: str, config: ImageConfig) -> None:
+    """Populate Rust ImageStore from an :class:`ImageConfig`."""
     try:
         from nitrobox._core import py_image_store_put
-        config = docker_info.get("Config") or {}
-
-        env_dict: dict[str, str] = {}
-        for entry in config.get("Env") or []:
-            key, _, value = entry.partition("=")
-            env_dict[key] = value
-
-        ports: list[int] = []
-        for port_proto in config.get("ExposedPorts") or {}:
-            port_str = port_proto.split("/")[0]
-            try:
-                ports.append(int(port_str))
-            except ValueError:
-                pass
-
-        import json as _json
-        payload = _json.dumps({
-            "image_id": docker_info.get("Id", ""),
-            "diff_ids": docker_info.get("RootFS", {}).get("Layers", []),
-            "cmd": config.get("Cmd"),
-            "entrypoint": config.get("Entrypoint"),
-            "env": env_dict,
-            "working_dir": config.get("WorkingDir") or None,
-            "exposed_ports": ports,
-        })
-        py_image_store_put(image_name, payload)
-    except Exception:
-        pass  # Non-critical — store is just a cache
-
-
-def _image_store_populate_from_config(image_name: str, config: dict) -> None:
-    """Populate Rust ImageStore from a registry config result."""
-    try:
-        from nitrobox._core import py_image_store_put
-        import json as _json
-        payload = _json.dumps({
+        payload = json.dumps({
             "image_id": "",
             "diff_ids": config.get("diff_ids", []),
             "cmd": config.get("cmd"),
@@ -350,8 +348,8 @@ def _image_store_populate_from_config(image_name: str, config: dict) -> None:
             "exposed_ports": config.get("exposed_ports", []),
         })
         py_image_store_put(image_name, payload)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to populate image store for %s: %s", image_name, exc)
 
 
 
@@ -611,7 +609,7 @@ def _get_manifest_diff_ids(
         if cfg:
             merged = dict(cfg)
             merged["diff_ids"] = data.get("diff_ids", [])
-            _image_store_populate_from_config(image_name, merged)
+            _image_store_populate(image_name, merged)
         return data.get("diff_ids")
 
     # Try digest-based key first (content-addressable)

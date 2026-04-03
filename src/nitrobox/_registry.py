@@ -210,41 +210,24 @@ def get_image_config_from_registry(
 def get_image_metadata_from_registry(image: str) -> dict:
     """Get diff_ids + container config from registry in a single call.
 
-    Returns a dict with keys: ``diff_ids``, ``cmd``, ``entrypoint``,
-    ``env``, ``working_dir``, ``exposed_ports``.
-
+    Returns an :class:`~nitrobox.rootfs.ImageConfig`-compatible dict.
     Raises on failure — callers decide whether to fall back or propagate.
     """
+    from nitrobox.rootfs import _parse_docker_env, _parse_docker_ports
+
     registry, repo, tag = parse_image_ref(image)
     token = _get_token(registry, repo)
     manifest = get_manifest(registry, repo, tag, token)
     config = get_image_config_from_registry(registry, repo, manifest, token)
 
-    rootfs = config.get("rootfs", {})
-    diff_ids = rootfs.get("diff_ids")
-
     container_config = config.get("config", {})
-    env_list = container_config.get("Env") or []
-    env_dict = {}
-    for entry in env_list:
-        k, _, v = entry.partition("=")
-        env_dict[k] = v
-
-    exposed = container_config.get("ExposedPorts") or {}
-    ports = []
-    for port_spec in exposed:
-        try:
-            ports.append(int(port_spec.split("/")[0]))
-        except (ValueError, IndexError):
-            pass
-
     return {
-        "diff_ids": diff_ids,
+        "diff_ids": config.get("rootfs", {}).get("diff_ids"),
         "cmd": container_config.get("Cmd"),
         "entrypoint": container_config.get("Entrypoint"),
-        "env": env_dict,
+        "env": _parse_docker_env(container_config.get("Env")),
         "working_dir": container_config.get("WorkingDir") or None,
-        "exposed_ports": ports,
+        "exposed_ports": _parse_docker_ports(container_config.get("ExposedPorts")),
     }
 
 

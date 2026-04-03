@@ -467,12 +467,22 @@ class DockerClient:
 #  Module-level singleton
 # ------------------------------------------------------------------
 
+import threading
+
 _client: DockerClient | None = None
+_client_lock = threading.Lock()
 
 
 def get_client() -> DockerClient:
-    """Return (or create) the module-level :class:`DockerClient`."""
+    """Return (or create) the module-level :class:`DockerClient`.
+
+    Thread-safe: uses double-checked locking so that concurrent callers
+    (e.g. health-check daemon threads) never create duplicate instances.
+    """
     global _client
-    if _client is None:
-        _client = DockerClient()
-    return _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is None:
+            _client = DockerClient()
+        return _client
