@@ -1905,11 +1905,10 @@ class TestDeleteCleansBackground:
 
 def _skip_if_no_registry():
     """Skip test at runtime if Docker Hub API is unreachable or rate-limited."""
-    from nitrobox._registry import get_diff_ids_from_registry
+    from nitrobox._registry import get_image_metadata_from_registry
     try:
-        if get_diff_ids_from_registry("alpine:3.19") is None:
-            pytest.skip("Docker Hub unreachable or rate-limited")
-    except (OSError, urllib.error.URLError, RuntimeError):
+        get_image_metadata_from_registry("alpine:3.19")
+    except Exception:
         pytest.skip("Docker Hub unreachable or rate-limited")
 
 
@@ -1930,22 +1929,19 @@ class TestRegistry:
     def test_get_diff_ids_from_registry(self):
         """Can get layer diff_ids directly from Docker Hub."""
         _skip_if_no_registry()
-        from nitrobox._registry import get_diff_ids_from_registry
+        from nitrobox._registry import get_image_metadata_from_registry
 
-        ids = get_diff_ids_from_registry("ubuntu:22.04")
-        if ids is None:
-            pytest.skip("Docker Hub rate-limited for ubuntu:22.04")
-        assert len(ids) >= 1
-        assert all(d.startswith("sha256:") for d in ids)
+        metadata = get_image_metadata_from_registry("ubuntu:22.04")
+        diff_ids = metadata["diff_ids"]
+        assert len(diff_ids) >= 1
+        assert all(d.startswith("sha256:") for d in diff_ids)
 
     def test_get_config_from_registry(self):
         """Can get image config directly from Docker Hub."""
         _skip_if_no_registry()
-        from nitrobox._registry import get_config_from_registry
+        from nitrobox._registry import get_image_metadata_from_registry
 
-        cfg = get_config_from_registry("python:3.11-slim")
-        if cfg is None:
-            pytest.skip("Docker Hub rate-limited for python:3.11-slim")
+        cfg = get_image_metadata_from_registry("python:3.11-slim")
         assert cfg["cmd"] == ["python3"]
 
     def test_registry_fallback_layers(self, tmp_path):
@@ -1953,11 +1949,9 @@ class TestRegistry:
         _skip_if_no_registry()
         import nitrobox.rootfs as rf
 
-        # Test the registry extraction path directly.
-        from nitrobox._registry import get_diff_ids_from_registry
-        diff_ids = get_diff_ids_from_registry("ubuntu:22.04")
-        if diff_ids is None:
-            pytest.skip("Docker Hub rate-limited for ubuntu:22.04")
+        from nitrobox._registry import get_image_metadata_from_registry
+        metadata = get_image_metadata_from_registry("ubuntu:22.04")
+        diff_ids = metadata["diff_ids"]
 
         layers_dir = tmp_path / "cache" / "layers"
         layers_dir.mkdir(parents=True, exist_ok=True)

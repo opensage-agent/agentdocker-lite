@@ -46,12 +46,11 @@ def _requires_docker():
 
 def _skip_if_no_registry():
     """Skip test if Docker Hub API is unreachable or rate-limited."""
-    from nitrobox._registry import get_diff_ids_from_registry
+    from nitrobox._registry import get_image_metadata_from_registry
 
     try:
-        if get_diff_ids_from_registry("alpine:3.19") is None:
-            pytest.skip("Docker Hub unreachable or rate-limited")
-    except (OSError, urllib.error.URLError, RuntimeError):
+        get_image_metadata_from_registry("alpine:3.19")
+    except Exception:
         pytest.skip("Docker Hub unreachable or rate-limited")
 
 
@@ -780,8 +779,8 @@ class TestRegistryFirstIntegration:
             mock_get_client.return_value = mock_client
 
             with patch(
-                "nitrobox._registry.get_config_from_registry",
-                return_value=None,
+                "nitrobox._registry.get_image_metadata_from_registry",
+                side_effect=RuntimeError("fake registry error"),
             ):
                 config = get_image_config("totally-fake-registry.invalid/nope:v1")
         assert config is None

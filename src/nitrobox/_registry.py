@@ -207,18 +207,45 @@ def get_image_config_from_registry(
     return json.loads(data)
 
 
-def get_diff_ids_from_registry(image: str) -> list[str] | None:
-    """Get layer diff_ids from registry (without Docker)."""
-    try:
-        registry, repo, tag = parse_image_ref(image)
-        token = _get_token(registry, repo)
-        manifest = get_manifest(registry, repo, tag, token)
-        config = get_image_config_from_registry(registry, repo, manifest, token)
-        rootfs = config.get("rootfs", {})
-        return rootfs.get("diff_ids")
-    except (OSError, urllib.error.URLError, RuntimeError, KeyError) as e:
-        logger.debug("Registry diff_ids failed for %s: %s", image, e)
-        return None
+def get_image_metadata_from_registry(image: str) -> dict:
+    """Get diff_ids + container config from registry in a single call.
+
+    Returns a dict with keys: ``diff_ids``, ``cmd``, ``entrypoint``,
+    ``env``, ``working_dir``, ``exposed_ports``.
+
+    Raises on failure — callers decide whether to fall back or propagate.
+    """
+    registry, repo, tag = parse_image_ref(image)
+    token = _get_token(registry, repo)
+    manifest = get_manifest(registry, repo, tag, token)
+    config = get_image_config_from_registry(registry, repo, manifest, token)
+
+    rootfs = config.get("rootfs", {})
+    diff_ids = rootfs.get("diff_ids")
+
+    container_config = config.get("config", {})
+    env_list = container_config.get("Env") or []
+    env_dict = {}
+    for entry in env_list:
+        k, _, v = entry.partition("=")
+        env_dict[k] = v
+
+    exposed = container_config.get("ExposedPorts") or {}
+    ports = []
+    for port_spec in exposed:
+        try:
+            ports.append(int(port_spec.split("/")[0]))
+        except (ValueError, IndexError):
+            pass
+
+    return {
+        "diff_ids": diff_ids,
+        "cmd": container_config.get("Cmd"),
+        "entrypoint": container_config.get("Entrypoint"),
+        "env": env_dict,
+        "working_dir": container_config.get("WorkingDir") or None,
+        "exposed_ports": ports,
+    }
 
 
 def download_layer(
@@ -272,39 +299,3 @@ def pull_image_layers(
     return result
 
 
-def get_config_from_registry(image: str) -> dict | None:
-    """Get image config (CMD, ENV, WORKDIR, etc.) from registry.
-
-    Returns same format as rootfs.get_image_config().
-    """
-    try:
-        registry, repo, tag = parse_image_ref(image)
-        token = _get_token(registry, repo)
-        manifest = get_manifest(registry, repo, tag, token)
-        config = get_image_config_from_registry(registry, repo, manifest, token)
-
-        container_config = config.get("config", {})
-        env_list = container_config.get("Env") or []
-        env_dict = {}
-        for entry in env_list:
-            k, _, v = entry.partition("=")
-            env_dict[k] = v
-
-        exposed = container_config.get("ExposedPorts") or {}
-        ports = []
-        for port_spec in exposed:
-            try:
-                ports.append(int(port_spec.split("/")[0]))
-            except (ValueError, IndexError):
-                pass
-
-        return {
-            "cmd": container_config.get("Cmd"),
-            "entrypoint": container_config.get("Entrypoint"),
-            "env": env_dict,
-            "working_dir": container_config.get("WorkingDir") or None,
-            "exposed_ports": ports,
-        }
-    except (OSError, urllib.error.URLError, RuntimeError, KeyError) as e:
-        logger.debug("Registry config failed for %s: %s", image, e)
-        return None

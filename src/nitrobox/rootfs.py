@@ -129,18 +129,32 @@ def _convert_whiteouts_in_userns(layer_dir: Path) -> None:
 # ====================================================================== #
 
 
-def _get_image_diff_ids(image_name: str) -> list[str] | None:
-    """Get layer diff_ids: ImageStore → registry → Docker API."""
+def _get_image_diff_ids(image_name: str) -> list[str]:
+    """Get layer diff_ids: ImageStore → registry → Docker API.
+
+    Also caches the full image config (WORKDIR, CMD, etc.) in the
+    ImageStore so that subsequent ``get_image_config()`` calls never
+    need a second registry round-trip.
+
+    Raises ``RuntimeError`` with a descriptive message (including root
+    causes from each failed source) if all sources fail.
+    """
     # 1. Rust in-memory store (~0ms)
     cached = _image_store_get(image_name)
     if cached and cached.get("diff_ids"):
         return cached["diff_ids"]
 
-    # 2. Registry API — no Docker needed (~100ms)
-    from nitrobox._registry import get_diff_ids_from_registry
-    diff_ids = get_diff_ids_from_registry(image_name)
-    if diff_ids:
-        return diff_ids
+    errors: list[tuple[str, Exception]] = []
+
+    # 2. Registry API — single call for both diff_ids and config (~100ms)
+    from nitrobox._registry import get_image_metadata_from_registry
+    try:
+        metadata = get_image_metadata_from_registry(image_name)
+        if metadata.get("diff_ids"):
+            _image_store_populate_from_config(image_name, metadata)
+            return metadata["diff_ids"]
+    except Exception as exc:
+        errors.append(("registry", exc))
 
     # 3. Docker API — for locally-built images not on any registry
     try:
@@ -148,35 +162,50 @@ def _get_image_diff_ids(image_name: str) -> list[str] | None:
         diff_ids = info.get("RootFS", {}).get("Layers")
         if diff_ids:
             _image_store_populate(image_name, info)
-        return diff_ids
-    except Exception:
-        pass
+            return diff_ids
+    except Exception as exc:
+        errors.append(("docker", exc))
 
-    return None
+    detail = "; ".join(f"{src}: {exc}" for src, exc in errors)
+    raise RuntimeError(
+        f"Cannot get image metadata for {image_name!r} [{detail}]"
+    )
 
 
 def get_image_config(image_name: str) -> dict | None:
     """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker/OCI image.
 
-    Resolution order: ImageStore → registry → Docker API.
+    Resolution order:
+      1. Rust in-memory ImageStore (~0ms)
+      2. Disk manifest cache — persisted config from prior rootfs prep
+      3. Registry API — single call for diff_ids + config (~100ms)
+      4. Docker API — for locally-built images not on any registry
 
     Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
-    ``working_dir``, ``exposed_ports``.  Returns ``None`` if the
-    image cannot be inspected.
+    ``working_dir``, ``exposed_ports``.  Returns ``None`` only when
+    no source has the image at all (e.g. typo in image name).
     """
     # 1. Rust in-memory store (~0ms)
     cached = _image_store_get(image_name)
     if cached is not None:
         return cached
 
-    # 2. Registry API — no Docker needed (~100ms)
-    from nitrobox._registry import get_config_from_registry
-    result = get_config_from_registry(image_name)
-    if result:
-        _image_store_populate_from_config(image_name, result)
-        return result
+    # 2. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
+    disk_cfg = _read_config_from_manifest_cache(image_name)
+    if disk_cfg is not None:
+        _image_store_populate_from_config(image_name, disk_cfg)
+        return disk_cfg
 
-    # 3. Docker API — for locally-built images not on any registry
+    # 3. Registry API — single call for diff_ids + config (~100ms)
+    from nitrobox._registry import get_image_metadata_from_registry
+    try:
+        metadata = get_image_metadata_from_registry(image_name)
+        _image_store_populate_from_config(image_name, metadata)
+        return metadata
+    except Exception:
+        pass
+
+    # 4. Docker API — for locally-built images not on any registry
     try:
         info = get_client().image_inspect(image_name)
         config = info.get("Config") or {}
@@ -208,6 +237,45 @@ def get_image_config(image_name: str) -> dict | None:
         pass
 
     return None
+
+
+# -- Disk config cache ------------------------------------------------ #
+
+def _read_config_from_manifest_cache(image_name: str) -> dict | None:
+    """Read image config from the on-disk manifest cache.
+
+    The manifest cache lives alongside the rootfs layer cache and is
+    populated by ``prepare_rootfs_layers_from_docker``.  Since the
+    manifest is written during rootfs extraction (which succeeds even
+    when the registry is rate-limited on subsequent calls), this
+    provides a reliable local source for WORKDIR/CMD/ENV.
+    """
+    cache_dir = _default_rootfs_cache_dir()
+    if cache_dir is None:
+        return None
+    manifests_dir = cache_dir / "manifests"
+    if not manifests_dir.exists():
+        return None
+
+    safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
+    for path in [manifests_dir / f"{safe_name}.json"]:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text())
+            cfg = data.get("config")
+            if cfg and cfg.get("working_dir") is not None:
+                return cfg
+        except (json.JSONDecodeError, OSError):
+            pass
+    return None
+
+
+def _default_rootfs_cache_dir() -> Path | None:
+    """Return the default rootfs cache directory."""
+    cache_home = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    d = Path(cache_home) / "nitrobox" / "rootfs"
+    return d if d.exists() else None
 
 
 # -- ImageStore helpers ------------------------------------------------ #
@@ -329,20 +397,19 @@ def prepare_rootfs_layers_from_docker(
             return layer_dirs
 
     # Get diff_ids: ImageStore → registry → Docker API
+    # Raises RuntimeError with descriptive message if all sources fail.
     diff_ids = _get_image_diff_ids(image_name)
-    if not diff_ids:
-        raise RuntimeError(
-            f"Cannot get layer diff_ids for {image_name!r}. "
-            f"Ensure the image exists on a registry or Docker is available."
-        )
 
     # Check if all layers are already cached
     layer_dirs = list(dict.fromkeys(
         layers_dir / _safe_cache_key(did) for did in diff_ids
     ))
+    # Get cached config from ImageStore (populated by _get_image_diff_ids)
+    img_config = _image_store_get(image_name)
+
     if all(d.exists() for d in layer_dirs):
         logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
-        _write_manifest(cache_dir, image_name, diff_ids)
+        _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
         return layer_dirs
 
     # Need to extract missing layers
@@ -368,7 +435,7 @@ def prepare_rootfs_layers_from_docker(
                 f"registry or Docker."
             ) from e
 
-    _write_manifest(cache_dir, image_name, diff_ids)
+    _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
     # Deduplicate layers preserving order (overlayfs ELOOP on duplicate lowerdir).
     seen: set[Path] = set()
     unique_dirs: list[Path] = []
@@ -525,50 +592,74 @@ def _get_manifest_diff_ids(
     Checks both digest-based and name-based manifest keys so that
     images with different tags but identical content (e.g. different
     compose project names) share the same cached layer set.
+
+    If the manifest also contains a ``config`` section (WORKDIR, CMD,
+    etc.), it is loaded into the in-memory ImageStore so that
+    ``get_image_config()`` can find it without a registry call.
     """
     manifests_dir = cache_dir / "manifests"
+
+    def _try_load(path: Path) -> list[str] | None:
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        # Populate ImageStore from persisted config (if present)
+        cfg = data.get("config")
+        if cfg:
+            merged = dict(cfg)
+            merged["diff_ids"] = data.get("diff_ids", [])
+            _image_store_populate_from_config(image_name, merged)
+        return data.get("diff_ids")
 
     # Try digest-based key first (content-addressable)
     digest = _get_image_digest(image_name)
     if digest:
-        digest_path = manifests_dir / f"{digest}.json"
-        if digest_path.exists():
-            try:
-                data = json.loads(digest_path.read_text())
-                return data.get("diff_ids")
-            except (json.JSONDecodeError, OSError):
-                pass
+        result = _try_load(manifests_dir / f"{digest}.json")
+        if result is not None:
+            return result
 
     # Fall back to name-based key (backward compat)
     safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")
-    manifest_path = manifests_dir / f"{safe_name}.json"
-    if not manifest_path.exists():
-        return None
-    try:
-        data = json.loads(manifest_path.read_text())
-        return data.get("diff_ids")
-    except (json.JSONDecodeError, OSError):
-        return None
+    return _try_load(manifests_dir / f"{safe_name}.json")
 
 
 def _write_manifest(
     cache_dir: Path,
     image_name: str,
     diff_ids: list[str],
+    image_config: dict | None = None,
 ) -> None:
-    """Write manifest mapping image to its layer diff_ids.
+    """Write manifest mapping image to its layer diff_ids and config.
 
     Writes under both the digest-based key and the name-based key
     so that future lookups by either tag or digest hit the cache.
+
+    The optional *image_config* dict (cmd, entrypoint, env,
+    working_dir, exposed_ports) is persisted alongside diff_ids so
+    that ``get_image_config()`` can read it from disk without a
+    registry round-trip.  This mirrors Podman's approach of storing
+    the OCI config blob locally after pull.
     """
     manifests_dir = cache_dir / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = json.dumps({
+    data: dict = {
         "image": image_name,
         "diff_ids": diff_ids,
         "layers": [_safe_cache_key(did) for did in diff_ids],
-    }, indent=2)
+    }
+    if image_config:
+        data["config"] = {
+            "cmd": image_config.get("cmd"),
+            "entrypoint": image_config.get("entrypoint"),
+            "env": image_config.get("env", {}),
+            "working_dir": image_config.get("working_dir"),
+            "exposed_ports": image_config.get("exposed_ports", []),
+        }
+    payload = json.dumps(data, indent=2)
 
     # Write name-based manifest
     safe_name = image_name.replace("/", "_").replace(":", "_").replace(".", "_")

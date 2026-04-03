@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from nitrobox._registry import (
-    get_config_from_registry,
+    get_image_metadata_from_registry,
     get_image_config_from_registry,
     get_manifest,
     parse_image_ref,
@@ -200,7 +200,7 @@ class TestGetImageConfig:
 
 
 class TestGetConfigFromRegistry:
-    """High-level get_config_from_registry (end-to-end parsing)."""
+    """High-level get_image_metadata_from_registry (end-to-end parsing)."""
 
     def test_extracts_cmd_env_workdir(self):
         """Extracts CMD, ENV, WORKDIR, exposed ports from config."""
@@ -216,7 +216,7 @@ class TestGetConfigFromRegistry:
 
         with patch("nitrobox._registry._registry_request", side_effect=mock_request):
             with patch("nitrobox._registry._get_token", return_value="faketoken"):
-                result = get_config_from_registry("ubuntu:22.04")
+                result = get_image_metadata_from_registry("ubuntu:22.04")
 
         assert result is not None
         assert result["cmd"] == ["/bin/bash"]
@@ -226,11 +226,11 @@ class TestGetConfigFromRegistry:
         assert result["working_dir"] == "/app"
         assert result["exposed_ports"] == [8080]
 
-    def test_returns_none_on_failure(self):
-        """Returns None when registry is unreachable."""
+    def test_raises_on_failure(self):
+        """Raises when registry is unreachable."""
         with patch("nitrobox._registry._get_token", side_effect=OSError("no network")):
-            result = get_config_from_registry("nonexistent:latest")
-        assert result is None
+            with pytest.raises(OSError):
+                get_image_metadata_from_registry("nonexistent:latest")
 
 
 # ====================================================================== #
@@ -335,12 +335,10 @@ class TestPullImageLayers:
 
 def _skip_if_no_registry():
     """Skip test if Docker Hub API is unreachable or rate-limited."""
-    import urllib.error
-    from nitrobox._registry import get_diff_ids_from_registry
+    from nitrobox._registry import get_image_metadata_from_registry
     try:
-        if get_diff_ids_from_registry("alpine:3.19") is None:
-            pytest.skip("Docker Hub unreachable or rate-limited")
-    except (OSError, urllib.error.URLError, RuntimeError):
+        get_image_metadata_from_registry("alpine:3.19")
+    except Exception:
         pytest.skip("Docker Hub unreachable or rate-limited")
 
 
@@ -350,7 +348,7 @@ class TestRegistryIntegration:
     def test_parse_and_get_config_ubuntu(self):
         """Fetch real ubuntu image config from Docker Hub."""
         _skip_if_no_registry()
-        result = get_config_from_registry("ubuntu:22.04")
+        result = get_image_metadata_from_registry("ubuntu:22.04")
         assert result is not None
         assert result["cmd"] is not None  # ubuntu has CMD ["/bin/bash"]
         assert "PATH" in result["env"]
@@ -358,7 +356,7 @@ class TestRegistryIntegration:
     def test_parse_and_get_config_python(self):
         """Fetch real python image config."""
         _skip_if_no_registry()
-        result = get_config_from_registry("python:3.11-slim")
+        result = get_image_metadata_from_registry("python:3.11-slim")
         assert result is not None
         assert "python" in (result.get("cmd") or [""])[0].lower() or result.get("entrypoint") is not None
         assert result["working_dir"] is not None or result["cmd"] is not None
@@ -366,9 +364,9 @@ class TestRegistryIntegration:
     def test_get_diff_ids(self):
         """Fetch diff_ids for a real image."""
         _skip_if_no_registry()
-        from nitrobox._registry import get_diff_ids_from_registry
-        diff_ids = get_diff_ids_from_registry("alpine:3.19")
-        assert diff_ids is not None
+        from nitrobox._registry import get_image_metadata_from_registry
+        metadata = get_image_metadata_from_registry("alpine:3.19")
+        diff_ids = metadata["diff_ids"]
         assert len(diff_ids) >= 1
         assert all(d.startswith("sha256:") for d in diff_ids)
 
