@@ -467,23 +467,23 @@ class Sandbox:
         if not rootfs or not rootfs.exists():
             raise SandboxInitError("No rootfs available to export")
 
+        # Create tar of rootfs and import via Docker Engine API.
         tar_proc = subprocess.Popen(
             ["tar", "-C", str(rootfs), "-c", "."],
             stdout=subprocess.PIPE,
         )
-        import_proc = subprocess.Popen(
-            ["docker", "import", "--change", "CMD /bin/sh", "-", image_name],
-            stdin=tar_proc.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if tar_proc.stdout is not None:
-            tar_proc.stdout.close()
-        _, stderr_bytes = import_proc.communicate()
-        stderr = (stderr_bytes or b"").decode(errors="replace")
-
-        if import_proc.returncode != 0:
-            raise SandboxInitError(f"docker import failed: {stderr.strip()}")
+        try:
+            from nitrobox.docker_api import get_client
+            # Split "name:tag" if provided.
+            if ":" in image_name:
+                repo, tag = image_name.rsplit(":", 1)
+            else:
+                repo, tag = image_name, "latest"
+            get_client().image_import(tar_proc.stdout, repo, tag)
+        except Exception as e:
+            raise SandboxInitError(f"docker import failed: {e}") from e
+        finally:
+            tar_proc.wait()
         logger.info("Saved sandbox as Docker image: %s", image_name)
 
     # ================================================================== #
@@ -1221,21 +1221,18 @@ class Sandbox:
     def _get_image_digest(image: str) -> str | None:
         """Get the content digest (sha256) of a Docker image.
 
-        Returns the digest string (e.g. ``sha256:abc123...``) or None
+        Returns the digest string (e.g. ``sha256_abc123...``) or None
         if the image doesn't exist or Docker is unavailable.
         """
         try:
-            result = subprocess.run(
-                ["docker", "image", "inspect", "--format", "{{.Id}}", image],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode == 0:
-                digest = result.stdout.strip()
-                # Normalize: "sha256:abc123..." → "sha256_abc123..."
-                return digest.replace(":", "_")[:80]
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-        return None
+            from nitrobox.docker_api import get_client, ImageNotFoundError
+            info = get_client().image_inspect(image)
+            digest = info.get("Id", "")
+            return digest.replace(":", "_")[:80] if digest else None
+        except ImageNotFoundError:
+            return None
+        except Exception:
+            return None
 
     @staticmethod
     def _resolve_cached_rootfs(

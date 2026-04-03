@@ -136,6 +136,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "container_image_dist_ref"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34d6a36cca589c5ee5b480b147783c2c80752b6d0a9cf5914a2cd7e82a9be8db"
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -438,6 +444,7 @@ dependencies = [
 name = "nitrobox-core"
 version = "0.0.6"
 dependencies = [
+ "container_image_dist_ref",
  "env_logger",
  "libc 1.0.0-alpha.3",
  "log",
@@ -445,6 +452,8 @@ dependencies = [
  "pyo3",
  "pyo3-stub-gen",
  "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

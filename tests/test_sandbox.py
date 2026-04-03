@@ -1949,21 +1949,24 @@ class TestRegistry:
         assert cfg["cmd"] == ["python3"]
 
     def test_registry_fallback_layers(self, tmp_path):
-        """Layer extraction works via registry when Docker/Podman unavailable."""
+        """Layer extraction works via registry API directly."""
         _skip_if_no_registry()
         import nitrobox.rootfs as rf
 
-        orig = rf._container_cli
-        rf._container_cli = lambda: None  # Force registry path
-        try:
-            layers = rf.prepare_rootfs_layers_from_docker(
-                "ubuntu:22.04", tmp_path / "cache",
-            )
-            assert len(layers) >= 1
-            # Layer should have rootfs content
-            assert (layers[0] / "bin").exists() or (layers[0] / "usr").exists()
-        finally:
-            rf._container_cli = orig
+        # Test the registry extraction path directly.
+        from nitrobox._registry import get_diff_ids_from_registry
+        diff_ids = get_diff_ids_from_registry("ubuntu:22.04")
+        if diff_ids is None:
+            pytest.skip("Docker Hub rate-limited for ubuntu:22.04")
+
+        layers_dir = tmp_path / "cache" / "layers"
+        layers_dir.mkdir(parents=True, exist_ok=True)
+        needed = set(diff_ids)
+        rf._extract_layers_from_registry("ubuntu:22.04", needed, layers_dir)
+
+        layer_dirs = [layers_dir / rf._safe_cache_key(d) for d in diff_ids]
+        assert len(layer_dirs) >= 1
+        assert (layer_dirs[0] / "bin").exists() or (layer_dirs[0] / "usr").exists()
 
 
 # ------------------------------------------------------------------ #

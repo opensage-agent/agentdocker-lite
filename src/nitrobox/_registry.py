@@ -63,7 +63,12 @@ def parse_image_ref(image: str) -> tuple[str, str, str]:
 
 
 def _get_token(registry: str, repo: str) -> str | None:
-    """Get bearer token for registry authentication."""
+    """Get bearer token for registry authentication.
+
+    For Docker Hub, reads credentials from ``~/.docker/config.json``
+    and sends them via HTTP Basic Auth to get an authenticated token
+    (avoids anonymous rate limits).
+    """
     if registry == _DOCKER_HUB:
         url = f"{_DOCKER_AUTH}?service=registry.docker.io&scope=repository:{repo}:pull"
     else:
@@ -86,12 +91,37 @@ def _get_token(registry: str, repo: str) -> str | None:
 
     try:
         req = urllib.request.Request(url)
+        # Add Basic auth from ~/.docker/config.json to avoid
+        # Docker Hub anonymous rate limits.
+        _add_docker_hub_auth(req, registry)
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
             return data.get("token") or data.get("access_token")
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
         logger.debug("Token request failed: %s", e)
         return None
+
+
+def _add_docker_hub_auth(req: urllib.request.Request, registry: str) -> None:
+    """Add HTTP Basic Auth to a token request from ~/.docker/config.json."""
+    import base64
+    from pathlib import Path
+
+    docker_hub_keys = {"https://index.docker.io/v1/", "docker.io", registry}
+    config_path = Path.home() / ".docker" / "config.json"
+    try:
+        if not config_path.exists():
+            return
+        data = json.loads(config_path.read_text())
+        auths = data.get("auths", {})
+        for key in docker_hub_keys:
+            entry = auths.get(key)
+            if entry and "auth" in entry:
+                # config.json stores base64(user:pass)
+                req.add_header("Authorization", f"Basic {entry['auth']}")
+                return
+    except Exception:
+        pass
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -273,7 +303,7 @@ def get_config_from_registry(image: str) -> dict | None:
             "entrypoint": container_config.get("Entrypoint"),
             "env": env_dict,
             "working_dir": container_config.get("WorkingDir") or None,
-            "exposed_ports": ports or None,
+            "exposed_ports": ports,
         }
     except (OSError, urllib.error.URLError, RuntimeError, KeyError) as e:
         logger.debug("Registry config failed for %s: %s", image, e)

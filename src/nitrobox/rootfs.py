@@ -11,6 +11,8 @@ import subprocess
 import tarfile
 from pathlib import Path
 
+from nitrobox.docker_api import get_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,85 +129,161 @@ def _convert_whiteouts_in_userns(layer_dir: Path) -> None:
 # ====================================================================== #
 
 
-def _container_cli() -> str | None:
-    """Return 'docker' or 'podman' if available, else None."""
-    import shutil
-    for cli in ("docker", "podman"):
-        if shutil.which(cli):
-            return cli
-    return None
-
-
 def _get_image_diff_ids(image_name: str) -> list[str] | None:
-    """Get layer diff_ids. Tries docker/podman inspect, then registry API."""
-    cli = _container_cli()
-    if cli:
-        result = subprocess.run(
-            [cli, "inspect", "--format",
-             "{{json .RootFS.Layers}}", image_name],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            try:
-                return json.loads(result.stdout.strip())
-            except (json.JSONDecodeError, TypeError):
-                pass
+    """Get layer diff_ids: ImageStore → registry → Docker API."""
+    # 1. Rust in-memory store (~0ms)
+    cached = _image_store_get(image_name)
+    if cached and cached.get("diff_ids"):
+        return cached["diff_ids"]
 
-    # Fallback: registry API (no Docker/Podman needed)
+    # 2. Registry API — no Docker needed (~100ms)
     from nitrobox._registry import get_diff_ids_from_registry
-    return get_diff_ids_from_registry(image_name)
+    diff_ids = get_diff_ids_from_registry(image_name)
+    if diff_ids:
+        return diff_ids
+
+    # 3. Docker API — for locally-built images not on any registry
+    try:
+        info = get_client().image_inspect(image_name)
+        diff_ids = info.get("RootFS", {}).get("Layers")
+        if diff_ids:
+            _image_store_populate(image_name, info)
+        return diff_ids
+    except Exception:
+        pass
+
+    return None
 
 
 def get_image_config(image_name: str) -> dict | None:
     """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker/OCI image.
 
-    Tries docker/podman inspect first, falls back to registry API.
+    Resolution order: ImageStore → registry → Docker API.
 
     Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
     ``working_dir``, ``exposed_ports``.  Returns ``None`` if the
     image cannot be inspected.
     """
-    cli = _container_cli()
-    if cli:
-        try:
-            _pull_or_check_local(image_name, cli=cli)
-        except RuntimeError:
-            pass
-        else:
-            result = subprocess.run(
-                [cli, "inspect", "--format", "{{json .Config}}", image_name],
-                capture_output=True, text=True,
-            )
-            if result.returncode == 0:
-                try:
-                    config = json.loads(result.stdout.strip())
-                except (json.JSONDecodeError, TypeError):
-                    config = None
-                if config:
-                    env_dict: dict[str, str] = {}
-                    for entry in config.get("Env") or []:
-                        key, _, value = entry.partition("=")
-                        env_dict[key] = value
+    # 1. Rust in-memory store (~0ms)
+    cached = _image_store_get(image_name)
+    if cached is not None:
+        return cached
 
-                    ports: list[int] = []
-                    for port_proto in config.get("ExposedPorts") or {}:
-                        port_str = port_proto.split("/")[0]
-                        try:
-                            ports.append(int(port_str))
-                        except ValueError:
-                            pass
-
-                    return {
-                        "cmd": config.get("Cmd"),
-                        "entrypoint": config.get("Entrypoint"),
-                        "env": env_dict,
-                        "working_dir": config.get("WorkingDir") or None,
-                        "exposed_ports": ports,
-                    }
-
-    # Fallback: registry API
+    # 2. Registry API — no Docker needed (~100ms)
     from nitrobox._registry import get_config_from_registry
-    return get_config_from_registry(image_name)
+    result = get_config_from_registry(image_name)
+    if result:
+        _image_store_populate_from_config(image_name, result)
+        return result
+
+    # 3. Docker API — for locally-built images not on any registry
+    try:
+        info = get_client().image_inspect(image_name)
+        config = info.get("Config") or {}
+
+        env_dict: dict[str, str] = {}
+        for entry in config.get("Env") or []:
+            key, _, value = entry.partition("=")
+            env_dict[key] = value
+
+        ports: list[int] = []
+        for port_proto in config.get("ExposedPorts") or {}:
+            port_str = port_proto.split("/")[0]
+            try:
+                ports.append(int(port_str))
+            except ValueError:
+                pass
+
+        result = {
+            "cmd": config.get("Cmd"),
+            "entrypoint": config.get("Entrypoint"),
+            "env": env_dict,
+            "working_dir": config.get("WorkingDir") or None,
+            "exposed_ports": ports,
+        }
+
+        _image_store_populate(image_name, info)
+        return result
+    except Exception:
+        pass
+
+    return None
+
+
+# -- ImageStore helpers ------------------------------------------------ #
+
+def _image_store_get(image_name: str) -> dict | None:
+    """Look up image config in Rust in-memory store."""
+    try:
+        from nitrobox._core import py_image_store_get
+        raw = py_image_store_get(image_name)
+        if raw is None:
+            return None
+        import json as _json
+        data = _json.loads(raw)
+        return {
+            "cmd": data.get("cmd"),
+            "entrypoint": data.get("entrypoint"),
+            "env": data.get("env", {}),
+            "working_dir": data.get("working_dir"),
+            "exposed_ports": data.get("exposed_ports", []),
+            "diff_ids": data.get("diff_ids", []),
+        }
+    except Exception:
+        return None
+
+
+def _image_store_populate(image_name: str, docker_info: dict) -> None:
+    """Populate Rust ImageStore from a Docker API inspect result."""
+    try:
+        from nitrobox._core import py_image_store_put
+        config = docker_info.get("Config") or {}
+
+        env_dict: dict[str, str] = {}
+        for entry in config.get("Env") or []:
+            key, _, value = entry.partition("=")
+            env_dict[key] = value
+
+        ports: list[int] = []
+        for port_proto in config.get("ExposedPorts") or {}:
+            port_str = port_proto.split("/")[0]
+            try:
+                ports.append(int(port_str))
+            except ValueError:
+                pass
+
+        import json as _json
+        payload = _json.dumps({
+            "image_id": docker_info.get("Id", ""),
+            "diff_ids": docker_info.get("RootFS", {}).get("Layers", []),
+            "cmd": config.get("Cmd"),
+            "entrypoint": config.get("Entrypoint"),
+            "env": env_dict,
+            "working_dir": config.get("WorkingDir") or None,
+            "exposed_ports": ports,
+        })
+        py_image_store_put(image_name, payload)
+    except Exception:
+        pass  # Non-critical — store is just a cache
+
+
+def _image_store_populate_from_config(image_name: str, config: dict) -> None:
+    """Populate Rust ImageStore from a registry config result."""
+    try:
+        from nitrobox._core import py_image_store_put
+        import json as _json
+        payload = _json.dumps({
+            "image_id": "",
+            "diff_ids": config.get("diff_ids", []),
+            "cmd": config.get("cmd"),
+            "entrypoint": config.get("entrypoint"),
+            "env": config.get("env", {}),
+            "working_dir": config.get("working_dir"),
+            "exposed_ports": config.get("exposed_ports", []),
+        })
+        py_image_store_put(image_name, payload)
+    except Exception:
+        pass
 
 
 
@@ -250,19 +328,15 @@ def prepare_rootfs_layers_from_docker(
             logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
             return layer_dirs
 
-    # Need image metadata — pull if requested, then get diff_ids
-    cli = _container_cli()
-    if pull and cli:
-        _pull_or_check_local(image_name, cli=cli)
-
+    # Get diff_ids: ImageStore → registry → Docker API
     diff_ids = _get_image_diff_ids(image_name)
     if not diff_ids:
         raise RuntimeError(
             f"Cannot get layer diff_ids for {image_name!r}. "
-            f"Ensure Docker/Podman is available or the image exists on a registry."
+            f"Ensure the image exists on a registry or Docker is available."
         )
 
-    # Check again with fresh diff_ids (image may have been updated)
+    # Check if all layers are already cached
     layer_dirs = list(dict.fromkeys(
         layers_dir / _safe_cache_key(did) for did in diff_ids
     ))
@@ -276,20 +350,23 @@ def prepare_rootfs_layers_from_docker(
     logger.info("Extracting layers for %s (%d layers, %d cached)",
                 image_name, len(diff_ids), len(diff_ids) - len(needed))
 
-    if cli:
-        # Use docker/podman save
-        save_proc = subprocess.Popen(
-            [cli, "save", image_name],
-            stdout=subprocess.PIPE,
-        )
-        with tarfile.open(fileobj=save_proc.stdout, mode="r|") as outer_tar:
-            _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
-        save_proc.wait()
-        if save_proc.returncode != 0:
-            raise RuntimeError(f"{cli} save failed for {image_name!r}")
-    else:
-        # No container CLI — download directly from registry
+    # Primary: download from registry directly (no Docker needed)
+    try:
         _extract_layers_from_registry(image_name, needed, layers_dir)
+    except Exception as e:
+        logger.debug("Registry extraction failed for %s: %s", image_name, e)
+        # Fallback: Docker API save (for locally-built images)
+        try:
+            if pull:
+                _pull_or_check_local(image_name)
+            resp = get_client().image_save(image_name)
+            with tarfile.open(fileobj=resp, mode="r|") as outer_tar:
+                _extract_layers_from_save_tar(outer_tar, diff_ids, layers_dir)
+        except Exception:
+            raise RuntimeError(
+                f"Cannot extract layers for {image_name!r} from "
+                f"registry or Docker."
+            ) from e
 
     _write_manifest(cache_dir, image_name, diff_ids)
     # Deduplicate layers preserving order (overlayfs ELOOP on duplicate lowerdir).
@@ -432,15 +509,11 @@ def _extract_single_layer_locked(
 def _get_image_digest(image_name: str) -> str | None:
     """Get the content digest of a Docker image for cache keying."""
     try:
-        result = subprocess.run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image_name],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip().replace(":", "_")[:80]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
+        info = get_client().image_inspect(image_name)
+        digest = info.get("Id", "")
+        return digest.replace(":", "_")[:80] if digest else None
+    except Exception:
+        return None
 
 
 def _get_manifest_diff_ids(
@@ -507,29 +580,15 @@ def _write_manifest(
         (manifests_dir / f"{digest}.json").write_text(payload)
 
 
-def _pull_or_check_local(image_name: str, cli: str | None = None) -> None:
+def _pull_or_check_local(image_name: str, **_kwargs: object) -> None:
     """Ensure image is available locally, pulling only if needed."""
-    if cli is None:
-        cli = _container_cli()
-    if not cli:
-        raise RuntimeError("No container CLI (docker/podman) available")
-
-    check = subprocess.run(
-        [cli, "image", "inspect", image_name],
-        capture_output=True,
-    )
-    if check.returncode == 0:
+    client = get_client()
+    if client.image_exists(image_name):
         logger.debug("Image exists locally: %s", image_name)
         return
 
     logger.info("Pulling image: %s", image_name)
-    result = subprocess.run(
-        [cli, "pull", image_name],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{cli} pull failed: {result.stderr.strip()}")
+    client.image_pull(image_name)
 
 
 def prepare_rootfs_from_docker(
@@ -558,41 +617,25 @@ def prepare_rootfs_from_docker(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    client = get_client()
     if pull:
         _pull_or_check_local(image_name)
 
     logger.info("Creating temporary container from %s", image_name)
-    create = subprocess.run(
-        ["docker", "create", image_name],
-        capture_output=True,
-        text=True,
-    )
-    if create.returncode != 0:
-        raise RuntimeError(f"docker create failed: {create.stderr.strip()}")
-    container_id = create.stdout.strip()
+    container_id = client.container_create(image_name)
 
     try:
         logger.info("Exporting %s -> %s", image_name, output_dir)
-        export_proc = subprocess.Popen(
-            ["docker", "export", container_id],
-            stdout=subprocess.PIPE,
-        )
-        tar_proc = subprocess.Popen(
-            ["tar", "-C", str(output_dir), "-xf", "-"],
-            stdin=export_proc.stdout,
-        )
-        if export_proc.stdout is not None:
-            export_proc.stdout.close()
-        tar_proc.communicate()
-
-        if tar_proc.returncode != 0:
-            raise RuntimeError(
-                f"tar extraction failed for {image_name} (exit {tar_proc.returncode})"
-            )
+        resp = client.container_export(container_id)
+        with tarfile.open(fileobj=resp, mode="r|") as tar:
+            tar.extractall(output_dir, filter="tar")
     finally:
-        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+        client.container_remove(container_id, force=True)
 
-    subprocess.run(["docker", "rmi", "-f", image_name], capture_output=True)
+    try:
+        client.image_remove(image_name, force=True)
+    except Exception:
+        pass
 
     logger.info("Rootfs ready: %s", output_dir)
     return output_dir
@@ -645,43 +688,27 @@ def prepare_btrfs_rootfs_from_docker(
         )
     logger.info("Created btrfs subvolume: %s", subvolume_path)
 
+    client = get_client()
     if pull:
         _pull_or_check_local(image_name)
 
     logger.info("Creating temporary container from %s", image_name)
-    create = subprocess.run(
-        ["docker", "create", image_name],
-        capture_output=True,
-        text=True,
-    )
-    if create.returncode != 0:
-        raise RuntimeError(f"docker create failed: {create.stderr.strip()}")
-    container_id = create.stdout.strip()
+    container_id = client.container_create(image_name)
 
     try:
         logger.info(
             "Exporting %s -> %s (btrfs subvolume)", image_name, subvolume_path
         )
-        export_proc = subprocess.Popen(
-            ["docker", "export", container_id],
-            stdout=subprocess.PIPE,
-        )
-        tar_proc = subprocess.Popen(
-            ["tar", "-C", str(subvolume_path), "-xf", "-"],
-            stdin=export_proc.stdout,
-        )
-        if export_proc.stdout is not None:
-            export_proc.stdout.close()
-        tar_proc.communicate()
-
-        if tar_proc.returncode != 0:
-            raise RuntimeError(
-                f"tar extraction failed for {image_name} (exit {tar_proc.returncode})"
-            )
+        resp = client.container_export(container_id)
+        with tarfile.open(fileobj=resp, mode="r|") as tar:
+            tar.extractall(subvolume_path, filter="tar")
     finally:
-        subprocess.run(["docker", "rm", "-f", container_id], capture_output=True)
+        client.container_remove(container_id, force=True)
 
-    subprocess.run(["docker", "rmi", "-f", image_name], capture_output=True)
+    try:
+        client.image_remove(image_name, force=True)
+    except Exception:
+        pass
 
     logger.info("btrfs rootfs ready: %s", subvolume_path)
     return subvolume_path

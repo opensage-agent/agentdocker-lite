@@ -19,6 +19,7 @@
 )]
 
 pub mod cgroup;
+pub mod image_store;
 pub mod init;
 pub mod mount;
 pub mod nsenter;
@@ -493,6 +494,89 @@ fn py_convert_whiteouts(layer_dir: &str, use_user_xattr: bool) -> PyResult<u32> 
 }
 
 // ======================================================================
+// Image store bindings
+// ======================================================================
+
+/// Look up cached image config.  Returns JSON string or None.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_image_store_get(image_name: &str) -> Option<String> {
+    image_store::get(image_name).map(|c| serde_json::to_string(&c).unwrap())
+}
+
+/// Store image config (pass JSON string).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_image_store_put(image_name: &str, config_json: &str) -> PyResult<()> {
+    let config: image_store::ImageConfig = serde_json::from_str(config_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    image_store::put(image_name, config);
+    Ok(())
+}
+
+/// Clear all cached entries.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_image_store_clear() {
+    image_store::clear();
+}
+
+/// Parse a Docker/OCI image reference and return (domain, repository, tag_or_digest).
+///
+/// Uses ``container_image_dist_ref`` (Rust port of Go's
+/// ``distribution/reference``) for spec-compliant parsing, then applies
+/// Docker's ``splitDockerDomain`` normalization: if the crate-parsed
+/// domain has no ``.`` or ``:`` and isn't ``localhost``, it's a Docker
+/// Hub namespace, not a registry.
+///
+/// Examples:
+///   ``"ubuntu:22.04"`` → ``("docker.io", "library/ubuntu", "22.04")``
+///   ``"ghcr.io/org/repo:v1"`` → ``("ghcr.io", "org/repo", "v1")``
+///   ``"alexgshaw/img:tag"`` → ``("docker.io", "alexgshaw/img", "tag")``
+///   ``"localhost:5000/img:v1"`` → ``("localhost:5000", "img", "v1")``
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_parse_image_ref(image: &str) -> PyResult<(String, String, String)> {
+    use container_image_dist_ref::ImgRef;
+
+    let parsed = ImgRef::new(image)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+            format!("Invalid image ref '{image}': {e:?}"),
+        ))?;
+
+    // Get crate-parsed domain and path.
+    let raw_domain = parsed.domain().map(|d| d.to_str());
+    let raw_path = parsed.path().to_str();
+    let tag = parsed.tag().unwrap_or("latest").to_owned();
+
+    // Docker's splitDockerDomain normalization:
+    // If the parsed "domain" has no '.' or ':' and isn't "localhost",
+    // it's actually a Docker Hub namespace (user/org), not a registry.
+    let (domain, full_path) = match raw_domain {
+        None => {
+            // No domain at all (e.g. "ubuntu:22.04")
+            let path = if raw_path.contains('/') {
+                raw_path.to_owned()
+            } else {
+                format!("library/{raw_path}")
+            };
+            ("docker.io".to_owned(), path)
+        }
+        Some(d) if d.contains('.') || d.contains(':') || d == "localhost" => {
+            // Real registry domain (ghcr.io, localhost:5000, etc.)
+            (d.to_owned(), raw_path.to_owned())
+        }
+        Some(d) => {
+            // Docker Hub namespace (e.g. "alexgshaw" in "alexgshaw/repo")
+            // → domain is docker.io, path includes the namespace.
+            ("docker.io".to_owned(), format!("{d}/{raw_path}"))
+        }
+    };
+
+    Ok((domain, full_path, tag))
+}
+
+// ======================================================================
 // Module definition
 // ======================================================================
 
@@ -552,6 +636,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // proc (fuser)
     m.add_function(wrap_pyfunction!(py_fuser_kill, m)?)?;
+
+    // image store
+    m.add_function(wrap_pyfunction!(py_image_store_get, m)?)?;
+    m.add_function(wrap_pyfunction!(py_image_store_put, m)?)?;
+    m.add_function(wrap_pyfunction!(py_image_store_clear, m)?)?;
+
+    // image reference parsing
+    m.add_function(wrap_pyfunction!(py_parse_image_ref, m)?)?;
 
     Ok(())
 }

@@ -18,7 +18,6 @@ import logging
 import os
 import re
 import shlex
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -322,91 +321,59 @@ class ComposeProject:
     # -- internals ----------------------------------------------------- #
 
     def _resolve_image_map(self) -> dict[str, str]:
-        """Query ``docker compose config`` for resolved image names.
+        """Resolve image names and build missing images.
 
-        Uses ``docker compose config --format json`` to get the exact
-        image names that Docker Compose would use (including computed
-        names for ``build:``-only services).  Automatically builds
-        missing images for services that have a ``build:`` section.
+        Mirrors Docker Compose's ``ensureImagesExists`` logic:
 
-        Falls back to the ``image`` field from our own parser if the
-        Docker Compose CLI is unavailable.
+        - Resolve image names from our own compose parser (no
+          ``docker compose config`` subprocess).
+        - For ``build:`` services: ``{project_name}-{service_name}``
+          (same convention as Docker Compose).
+        - Check if image exists via Docker Engine API (~5ms).
+        - Build missing images via Docker Engine API ``POST /build``.
         """
-        mapping = self._query_compose_config()
-        if not mapping:
-            # Fallback: use image fields from our own parser.
-            # For build-only services, infer {project}-{service} name.
-            project = self._project_name or self._compose_files[0].parent.name
-            fallback = {}
-            for name, svc in self._defs.items():
-                if svc.image:
-                    fallback[name] = svc.image
-                elif svc.build:
-                    fallback[name] = f"{project}-{name}"
-            return fallback
+        from nitrobox.docker_api import get_client
 
-        # Build missing images for services that have build: context
-        missing = [
-            name for name in self._defs
-            if self._defs[name].build
-            and name in mapping
-            and not self._image_exists_locally(mapping[name])
-        ]
-        if missing:
-            logger.info("Building missing images for: %s", ", ".join(missing))
-            build_cmd = ["docker", "compose"]
-            for f in self._compose_files:
-                build_cmd.extend(["-f", str(f)])
-            build_cmd.append("build")
-            build_cmd.extend(missing)
-            if self._project_name:
-                build_cmd[2:2] = ["-p", self._project_name]
-            subprocess.run(
-                build_cmd, check=True,
-                env={**os.environ, **(self._env or {})},
+        client = get_client()
+        project = self._project_name or self._compose_files[0].parent.name
+
+        mapping: dict[str, str] = {}
+        for name, svc in self._defs.items():
+            if svc.image:
+                mapping[name] = svc.image
+            elif svc.build:
+                mapping[name] = f"{project}-{name}"
+
+        # Build missing images for services with build: section.
+        # Prebuilt images (svc.image without build:) are NOT pulled here —
+        # they are fetched directly from the registry during rootfs
+        # preparation, bypassing Docker entirely (Phase 3).
+        for name, svc in self._defs.items():
+            if not svc.build or name not in mapping:
+                continue
+
+            image_name = mapping[name]
+            if client.image_exists(image_name):
+                continue
+
+            build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}
+            context = str(build_cfg.get("context", "."))
+            dockerfile = build_cfg.get("dockerfile", "Dockerfile")
+            build_args = build_cfg.get("args")
+            if isinstance(build_args, list):
+                build_args = dict(
+                    arg.split("=", 1) for arg in build_args if "=" in arg
+                )
+
+            logger.info("Building image for service %s: %s", name, image_name)
+            client.image_build(
+                context,
+                dockerfile=dockerfile,
+                tag=image_name,
+                build_args=build_args,
             )
 
         return mapping
-
-    def _query_compose_config(self) -> dict[str, str]:
-        """Run ``docker compose config --format json`` and parse results."""
-        cmd = ["docker", "compose"]
-        for f in self._compose_files:
-            cmd.extend(["-f", str(f)])
-        cmd.extend(["config", "--format", "json"])
-        if self._project_name:
-            cmd[2:2] = ["-p", self._project_name]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30,
-                env={**os.environ, **(self._env or {})},
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                project = data.get("name", self._project_name or "default")
-                mapping = {}
-                for name, svc in (data.get("services") or {}).items():
-                    if svc.get("image"):
-                        mapping[name] = svc["image"]
-                    elif svc.get("build"):
-                        # build-only service: docker compose tags as {project}-{service}
-                        mapping[name] = f"{project}-{name}"
-                return mapping
-        except (FileNotFoundError, subprocess.TimeoutExpired,
-                json.JSONDecodeError) as e:
-            logger.debug("docker compose config unavailable: %s", e)
-        return {}
-
-    @staticmethod
-    def _image_exists_locally(image: str) -> bool:
-        """Check if a Docker/Podman image exists in the local store."""
-        try:
-            return subprocess.run(
-                ["docker", "image", "inspect", image],
-                capture_output=True, timeout=10,
-            ).returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
 
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""
