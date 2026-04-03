@@ -37,6 +37,7 @@ pub struct SandboxSpawnConfig {
     pub subuid_range: Option<(u32, u32, u32)>,
     pub seccomp: bool,
     pub cap_add: Vec<u32>,
+    pub cap_drop: Vec<u32>,
     pub hostname: Option<String>,
     pub read_only: bool,
     pub landlock_read_paths: Vec<String>,
@@ -76,10 +77,15 @@ pub struct SpawnResult {
 // Docker-default masked/readonly paths
 // ======================================================================
 
+// Matches runc default (specconv/example.go:104-115).
 const MASKED_PATHS: &[&str] = &[
+    "/proc/acpi",
+    "/proc/asound",
     "/proc/kcore",
     "/proc/keys",
+    "/proc/latency_stats",
     "/proc/timer_list",
+    "/proc/timer_stats",
     "/proc/sched_debug",
     "/sys/firmware",
     "/proc/scsi",
@@ -179,19 +185,14 @@ fn mount_overlay_fs(config: &SandboxSpawnConfig) -> io::Result<()> {
             log::debug!("remove work/work failed: {e}");
         }
 
-        if config.userns {
-            // User namespace: must add userxattr option
-            let opts = format!("lowerdir={lowerdir},upperdir={upper},workdir={work},userxattr");
-            mnt(
-                Some("overlay"),
-                &config.rootfs,
-                Some("overlay"),
-                MsFlags::empty(),
-                Some(&opts),
-            )?;
+        // Podman: overlay.go:1809 — add "userxattr" if rootless
+        // Probe kernel support (matching buildkit's NeedsUserXAttr)
+        let extra: &[&str] = if config.userns && mount::needs_userxattr() {
+            &["userxattr"]
         } else {
-            mount::mount_overlay(lowerdir, upper, work, &config.rootfs)?;
-        }
+            &[]
+        };
+        mount::mount_overlay(lowerdir, upper, work, &config.rootfs, extra)?;
     }
     Ok(())
 }
@@ -322,6 +323,11 @@ fn setup_dev_links(rootfs: &str) {
     let _ = std::os::unix::fs::symlink("/proc/self/fd/1", format!("{dev}/stdout"));
     let _ = std::os::unix::fs::symlink("/proc/self/fd/2", format!("{dev}/stderr"));
 
+    // /dev/core → /proc/kcore (conditional, matching runc setupDevSymlinks)
+    if Path::new("/proc/kcore").exists() {
+        let _ = std::os::unix::fs::symlink("/proc/kcore", format!("{dev}/core"));
+    }
+
     let pts = format!("{dev}/pts");
     let _ = std::fs::create_dir_all(&pts);
     if let Err(e) = mnt(
@@ -337,6 +343,19 @@ fn setup_dev_links(rootfs: &str) {
 
     let shm = format!("{dev}/shm");
     let _ = std::fs::create_dir_all(&shm);
+
+    // /dev/mqueue — POSIX message queue filesystem (matching runc default spec)
+    let mqueue = format!("{dev}/mqueue");
+    let _ = std::fs::create_dir_all(&mqueue);
+    if let Err(e) = mnt(
+        Some("mqueue"),
+        &mqueue,
+        Some("mqueue"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC | MsFlags::MS_NODEV,
+        None::<&str>,
+    ) {
+        init_warn_tl(&format!("mount mqueue failed: {e}"));
+    }
 }
 
 fn mount_shm(rootfs: &str, shm_size: Option<u64>) {
@@ -542,7 +561,7 @@ fn apply_security(config: &SandboxSpawnConfig) {
         }
     }
 
-    match security::drop_capabilities(&config.cap_add) {
+    match security::drop_capabilities(&config.cap_add, &config.cap_drop) {
         Ok(n) => log::debug!("dropped {n} capabilities"),
         Err(e) => init_warn_tl(&format!("cap_drop failed: {e}")),
     }

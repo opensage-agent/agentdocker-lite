@@ -34,10 +34,12 @@ pub fn enable_controllers(cgroup_path: &Path, limits: &HashMap<String, String>) 
         ("cpu_max", "cpu"),
         ("cpu_shares", "cpu"),
         ("memory_max", "memory"),
+        ("memory_high", "memory"),
         ("memory_swap", "memory"),
         ("pids_max", "pids"),
         ("io_max", "io"),
         ("cpuset_cpus", "cpuset"),
+        ("cpuset_mems", "cpuset"),
     ];
 
     for (key, ctrl) in &controller_map {
@@ -64,9 +66,11 @@ pub fn apply_limits(cgroup_path: &Path, limits: &HashMap<String, String>) -> io:
     let limit_files = [
         ("cpu_max", "cpu.max"),
         ("memory_max", "memory.max"),
+        ("memory_high", "memory.high"),
         ("pids_max", "pids.max"),
         ("io_max", "io.max"),
         ("cpuset_cpus", "cpuset.cpus"),
+        ("cpuset_mems", "cpuset.mems"),
         ("cpu_shares", "cpu.weight"),
         ("memory_swap", "memory.swap.max"),
     ];

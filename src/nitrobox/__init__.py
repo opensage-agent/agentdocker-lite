@@ -9,7 +9,7 @@ from nitrobox._errors import (
 )
 from nitrobox.config import SandboxConfig
 from nitrobox.sandbox import Sandbox
-from nitrobox.rootfs import get_image_config
+from nitrobox.image.store import get_image_config
 from nitrobox.vm import QemuVM
 
 

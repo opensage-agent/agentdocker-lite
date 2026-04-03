@@ -13,7 +13,6 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -262,11 +261,25 @@ class ComposeProject:
         for name in reversed(self._startup_order):
             box = self._sandboxes.pop(name, None)
             if box:
+                # Send stop_signal to the service's main process before delete
+                handle = self._bg_handles.pop(name, None)
+                svc = self._defs.get(name)
+                if handle and svc and svc.stop_signal:
+                    try:
+                        box.run(
+                            f"kill -{svc.stop_signal} $(cat /tmp/.bg_{handle}.pid) 2>/dev/null || true"
+                        )
+                        import time
+                        time.sleep(
+                            _parse_duration(svc.stop_grace_period)
+                            if svc.stop_grace_period else 10
+                        )
+                    except Exception:
+                        pass
                 try:
                     box.delete()
                 except Exception as e:
                     logger.warning("Failed to delete sandbox %s: %s", name, e)
-            self._bg_handles.pop(name, None)
 
         # Destroy shared network namespaces
         for sn in self._shared_nets.values():
@@ -507,13 +520,15 @@ class ComposeProject:
             config_kwargs["memory_max"] = svc.mem_limit
         if svc.memswap_limit:
             config_kwargs["memory_swap"] = svc.memswap_limit
-        # cap_add: merge explicit cap_add with privileged (all caps)
+        # cap_add / cap_drop: merge with privileged (all caps)
         caps = list(svc.cap_add) if svc.cap_add else []
         if svc.privileged:
             from nitrobox.config import CAP_NAME_TO_NUM
             caps = list(CAP_NAME_TO_NUM.keys())
         if caps:
             config_kwargs["cap_add"] = caps
+        if svc.cap_drop:
+            config_kwargs["cap_drop"] = list(svc.cap_drop)
         # Don't use entrypoint as shell wrapper — run entrypoint+CMD
         # together as a background process in _cmd_string().  This avoids
         # passing unexpected args to non-wrapper entrypoints

@@ -129,8 +129,6 @@ class Sandbox:
 
     # -- rootless caches (class-level) ------------------------------------- #
     _prereq_checked = False
-    _cached_subuid_range: tuple[int, int, int] | None = None
-    _subuid_detected = False
 
     def __init__(self, config: SandboxConfig, name: str = "default"):
         self._config = config
@@ -167,12 +165,11 @@ class Sandbox:
                     py_umount_lazy(str(rootfs))
                 except OSError:
                     pass
-            for child in env_dir.rglob("*"):
-                try:
-                    child.chmod(0o700)
-                except OSError:
-                    pass
-            shutil.rmtree(env_dir, ignore_errors=True)
+            if self._userns:
+                from nitrobox.image.layers import rmtree_mapped
+                rmtree_mapped(env_dir)
+            else:
+                shutil.rmtree(env_dir, ignore_errors=True)
 
     # -- context manager --------------------------------------------------- #
 
@@ -607,14 +604,10 @@ class Sandbox:
 
         if self._env_dir.exists():
             if self._userns:
-                for work in self._env_dir.glob("*work*"):
-                    if work.is_dir():
-                        for child in work.rglob("*"):
-                            try:
-                                child.chmod(0o700)
-                            except OSError:
-                                pass
-            shutil.rmtree(self._env_dir, ignore_errors=True)
+                from nitrobox.image.layers import rmtree_mapped
+                rmtree_mapped(self._env_dir)
+            else:
+                shutil.rmtree(self._env_dir, ignore_errors=True)
 
         self._unregister(self)
 
@@ -903,9 +896,11 @@ class Sandbox:
         self._cgroup_limits = {
             "cpu_max": config.cpu_max,
             "memory_max": config.memory_max,
+            "memory_high": config.memory_high,
             "pids_max": config.pids_max,
             "io_max": config.io_max,
             "cpuset_cpus": config.cpuset_cpus,
+            "cpuset_mems": config.cpuset_mems,
             "cpu_shares": config.cpu_shares,
             "memory_swap": config.memory_swap,
         }
@@ -935,6 +930,7 @@ class Sandbox:
             "subuid_range": None,
             "seccomp": config.seccomp,
             "cap_add": cap_names_to_numbers(config.cap_add) if config.cap_add else [],
+            "cap_drop": cap_names_to_numbers(config.cap_drop) if config.cap_drop else [],
             "hostname": config.hostname,
             "read_only": config.read_only,
             "entrypoint": config.entrypoint or [],
@@ -1190,133 +1186,29 @@ class Sandbox:
     # ================================================================== #
 
     @staticmethod
-    def _resolve_base_rootfs(
-        image: str,
-        fs_backend: str,
-        rootfs_cache_dir: Path,
-    ) -> tuple[Path, list[Path] | None]:
-        """Resolve the base rootfs for a sandbox."""
-        candidate = Path(image)
-        if candidate.exists() and candidate.is_dir():
-            return candidate, None
-
-        if fs_backend == "btrfs":
-            return Sandbox._resolve_btrfs_rootfs(image, rootfs_cache_dir), None
-
-        # --- overlayfs: layer-level caching ---
-        from nitrobox.rootfs import prepare_rootfs_layers_from_docker
-
-        t0 = time.monotonic()
-        layer_dirs = prepare_rootfs_layers_from_docker(
-            image, rootfs_cache_dir, pull=True,
-        )
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        logger.info(
-            "Layer cache ready (%.1fms): %s (%d layers)",
-            elapsed_ms, image, len(layer_dirs),
-        )
-        return layer_dirs[0], layer_dirs
+    def _resolve_base_rootfs(image, fs_backend="overlayfs", rootfs_cache_dir=Path()):
+        from nitrobox.image.layers import resolve_base_rootfs
+        return resolve_base_rootfs(image, rootfs_cache_dir, fs_backend)
 
     @staticmethod
-    def _get_image_digest(image: str) -> str | None:
-        """Get the content digest (sha256) of a Docker image.
-
-        Returns the digest string (e.g. ``sha256_abc123...``) or None
-        if the image doesn't exist or Docker is unavailable.
-        """
-        try:
-            from nitrobox.docker_api import get_client, ImageNotFoundError
-            info = get_client().image_inspect(image)
-            digest = info.get("Id", "")
-            return digest.replace(":", "_")[:80] if digest else None
-        except ImageNotFoundError:
-            return None
-        except Exception:
-            return None
+    def _get_image_digest(image):
+        from nitrobox.image.layers import _get_image_digest
+        return _get_image_digest(image)
 
     @staticmethod
-    def _resolve_cached_rootfs(
-        image: str,
-        rootfs_cache_dir: Path,
-        prepare_fn: Any,
-        *,
-        verify_fn: Any = None,
-        label: str = "rootfs",
-    ) -> Path:
-        """Resolve a flat rootfs with file-lock-based caching.
-
-        Uses the image's content digest as the cache key so that
-        images with different tags but identical content share the
-        same cached rootfs (like Docker's layer cache).
-
-        Shared logic for btrfs and docker-export rootfs preparation.
-        """
-        import fcntl
-
-        candidate = Path(image)
-        if candidate.exists() and candidate.is_dir():
-            if verify_fn:
-                verify_fn(candidate)
-            return candidate
-
-        # Use content digest as cache key when available, falling
-        # back to the image name.  This ensures images with different
-        # tags but identical content (e.g. different compose project
-        # names) share the same cached rootfs.
-        digest = Sandbox._get_image_digest(image)
-        cache_key = digest if digest else image.replace("/", "_").replace(":", "_").replace(".", "_")
-        cached_rootfs = rootfs_cache_dir / cache_key
-
-        # Also check under the name-based key for backward compat
-        name_key = image.replace("/", "_").replace(":", "_").replace(".", "_")
-        name_cached = rootfs_cache_dir / name_key
-        if not cached_rootfs.exists() and name_cached.exists() and name_cached.is_dir():
-            cached_rootfs = name_cached
-
-        if cached_rootfs.exists() and cached_rootfs.is_dir():
-            if verify_fn:
-                verify_fn(cached_rootfs)
-            return cached_rootfs
-
-        lock_path = rootfs_cache_dir / f".{cache_key}.lock"
-        rootfs_cache_dir.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "w") as lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            try:
-                if cached_rootfs.exists() and cached_rootfs.is_dir():
-                    if verify_fn:
-                        verify_fn(cached_rootfs)
-                    return cached_rootfs
-
-                t0 = time.monotonic()
-                prepare_fn(image, cached_rootfs)
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                logger.info(
-                    "Auto-prepared %s (%.1fms): %s -> %s",
-                    label, elapsed_ms, image, cached_rootfs,
-                )
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        return cached_rootfs
+    def _resolve_cached_rootfs(image, rootfs_cache_dir, prepare_fn, *, verify_fn=None, label="rootfs"):
+        from nitrobox.image.layers import _resolve_cached_rootfs
+        return _resolve_cached_rootfs(image, rootfs_cache_dir, prepare_fn, verify_fn=verify_fn, label=label)
 
     @staticmethod
-    def _resolve_btrfs_rootfs(image: str, rootfs_cache_dir: Path) -> Path:
-        """Resolve flat rootfs for btrfs backend."""
-        from nitrobox.rootfs import prepare_btrfs_rootfs_from_docker
-        return Sandbox._resolve_cached_rootfs(
-            image, rootfs_cache_dir, prepare_btrfs_rootfs_from_docker,
-            verify_fn=Sandbox._verify_btrfs_subvolume,
-            label="btrfs rootfs",
-        )
+    def _resolve_btrfs_rootfs(image, rootfs_cache_dir):
+        from nitrobox.image.layers import resolve_btrfs_rootfs
+        return resolve_btrfs_rootfs(image, rootfs_cache_dir)
 
     @staticmethod
-    def _resolve_flat_rootfs(image: str, rootfs_cache_dir: Path) -> Path:
-        """Resolve flat rootfs via docker export (for userns/rootless)."""
-        from nitrobox.rootfs import prepare_rootfs_from_docker
-        return Sandbox._resolve_cached_rootfs(
-            image, rootfs_cache_dir, prepare_rootfs_from_docker,
-            label="flat rootfs",
-        )
+    def _resolve_flat_rootfs(image, rootfs_cache_dir):
+        from nitrobox.image.layers import resolve_flat_rootfs
+        return resolve_flat_rootfs(image, rootfs_cache_dir)
 
     # ================================================================== #
     #  Prerequisites                                                       #
@@ -1367,109 +1259,37 @@ class Sandbox:
 
     @classmethod
     def _detect_subuid_range(cls) -> tuple[int, int, int] | None:
-        """Detect subordinate UID range for full uid mapping in user namespaces."""
-        if cls._subuid_detected:
-            return cls._cached_subuid_range
-
-        if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
-            logger.warning(
-                "newuidmap/newgidmap not found — falling back to single-UID "
-                "mapping. Programs that switch users (apt-get, su, sudo) may "
-                "fail with 'Operation not permitted'. "
-                "Install the 'uidmap' package for full multi-UID support:\n"
-                "  Ubuntu/Debian: sudo apt-get install -y uidmap\n"
-                "  Fedora/RHEL:   sudo dnf install -y shadow-utils\n"
-                "  Arch:          sudo pacman -S shadow"
-            )
-            cls._subuid_detected = True
-            return None
-
-        import getpass
-        try:
-            username = getpass.getuser()
-        except (KeyError, OSError):
-            cls._subuid_detected = True
-            return None
-
-        uid = os.getuid()
-
-        try:
-            with open("/etc/subuid") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split(":")
-                    if len(parts) != 3:
-                        continue
-                    if parts[0] == username or parts[0] == str(uid):
-                        sub_start = int(parts[1])
-                        sub_count = int(parts[2])
-                        logger.debug(
-                            "Full uid mapping available: %s:%d:%d",
-                            username, sub_start, sub_count,
-                        )
-                        cls._cached_subuid_range = (uid, sub_start, sub_count)
-                        cls._subuid_detected = True
-                        return cls._cached_subuid_range
-        except FileNotFoundError:
-            pass
-
-        logger.debug(
-            "No /etc/subuid entry for %s. Falling back to root-only mapping.",
-            username,
-        )
-        cls._subuid_detected = True
-        return None
+        from nitrobox.config import detect_subuid_range
+        return detect_subuid_range()
 
     # ================================================================== #
     #  Filesystem -- overlayfs                                             #
     # ================================================================== #
 
     def _setup_overlay(self) -> None:
-        from nitrobox._core import py_mount_overlay
+        from nitrobox.storage.overlay import setup_overlay
 
         assert self._upper_dir is not None and self._work_dir is not None
-        for d in (self._upper_dir, self._work_dir, self._rootfs):
-            d.mkdir(parents=True, exist_ok=True)
-
-        py_mount_overlay(
+        setup_overlay(
             self._lowerdir_spec,
             str(self._upper_dir),
             str(self._work_dir),
             str(self._rootfs),
         )
-
-        from nitrobox._core import py_make_private
-        try:
-            py_make_private(str(self._rootfs))
-        except OSError:
-            pass
-
         self._overlay_mounted = True
-        logger.debug("Mounted overlayfs at %s", self._rootfs)
 
     def _reset_overlayfs(self) -> None:
-        if self._overlay_mounted:
-            from nitrobox._core import py_umount_lazy
-            try:
-                py_umount_lazy(str(self._rootfs))
-            except OSError:
-                pass
-            self._overlay_mounted = False
+        from nitrobox.storage.overlay import reset_overlayfs
 
         self._cleanup_dead_dirs()
-        for d in (self._upper_dir, self._work_dir):
-            if d and d.exists():
-                dead = d.with_name(f"{d.name}.dead.{time.monotonic_ns()}")
-                try:
-                    d.rename(dead)
-                except OSError:
-                    shutil.rmtree(d, ignore_errors=True)
-            if d:
-                d.mkdir(parents=True, exist_ok=True)
-
-        self._setup_overlay()
+        reset_overlayfs(
+            rootfs=str(self._rootfs),
+            upper_dir=str(self._upper_dir),
+            work_dir=str(self._work_dir),
+            lowerdir_spec=self._lowerdir_spec,
+            overlay_mounted=self._overlay_mounted,
+        )
+        self._overlay_mounted = True
 
     # ================================================================== #
     #  Filesystem -- btrfs                                                 #
@@ -1547,71 +1367,48 @@ class Sandbox:
     def _bind_mount(
         self, host_path: str, container_path: str, read_only: bool = False
     ) -> None:
-        from nitrobox._core import py_bind_mount, py_remount_ro_bind
+        from nitrobox.storage.overlay import bind_mount
 
-        target = self._rootfs / container_path.lstrip("/")
-        target.mkdir(parents=True, exist_ok=True)
-
-        try:
-            py_bind_mount(host_path, str(target))
-        except OSError as e:
-            logger.warning("Failed to bind mount %s -> %s: %s",
-                           host_path, container_path, e)
-            return
-
-        self._bind_mounts.append(target)
-
-        if read_only:
-            try:
-                py_remount_ro_bind(str(target))
-            except OSError:
-                pass
+        target = bind_mount(
+            host_path,
+            container_path,
+            str(self._rootfs),
+            read_only=read_only,
+        )
+        if target is not None:
+            self._bind_mounts.append(target)
 
     def _overlay_mount(self, host_path: str, container_path: str) -> None:
         """Mount a host directory as copy-on-write via overlayfs."""
-        import tempfile
-        from nitrobox._core import py_mount_overlay
+        from nitrobox.storage.overlay import overlay_mount
 
-        target = self._rootfs / container_path.lstrip("/")
-        target.mkdir(parents=True, exist_ok=True)
-
-        work_base = tempfile.mkdtemp(prefix="nbx_cow_")
-        upper = Path(work_base) / "upper"
-        work = Path(work_base) / "work"
-        upper.mkdir()
-        work.mkdir()
-
-        try:
-            py_mount_overlay(str(host_path), str(upper), str(work), str(target))
-        except OSError as e:
-            logger.warning("Failed to overlay mount %s -> %s: %s",
-                           host_path, container_path, e)
-            return
-
-        self._bind_mounts.append(target)
-        self._cow_tmpdirs.append(work_base)
+        target, work_base = overlay_mount(
+            host_path,
+            container_path,
+            str(self._rootfs),
+        )
+        if target is not None:
+            self._bind_mounts.append(target)
+            self._cow_tmpdirs.append(work_base)
 
     def _unmount_binds(self) -> None:
-        from nitrobox._core import py_umount_lazy
-        for mount_point in reversed(self._bind_mounts):
-            try:
-                py_umount_lazy(str(mount_point))
-            except OSError:
-                pass
-        self._bind_mounts.clear()
-        for tmpdir in self._cow_tmpdirs:
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        from nitrobox.storage.overlay import unmount_binds
+
+        unmount_binds(self._bind_mounts, self._cow_tmpdirs)
         self._cow_tmpdirs = []
 
     def _unmount_all(self) -> None:
-        from nitrobox._core import py_umount_recursive_lazy
-        self._unmount_binds()
-        if self._fs_backend == "overlayfs" and self._overlay_mounted:
-            try:
-                py_umount_recursive_lazy(str(self._rootfs))
-            except OSError:
-                pass
-            self._overlay_mounted = False
+        from nitrobox.storage.overlay import unmount_all
+
+        unmount_all(
+            rootfs=str(self._rootfs),
+            bind_mounts=self._bind_mounts,
+            cow_tmpdirs=self._cow_tmpdirs,
+            fs_backend=self._fs_backend,
+            overlay_mounted=self._overlay_mounted,
+        )
+        self._cow_tmpdirs = []
+        self._overlay_mounted = False
 
     # ================================================================== #
     #  cgroup v2 resource limits                                           #
@@ -1665,99 +1462,31 @@ class Sandbox:
     # ================================================================== #
 
     def _write_dns(self, dns_servers: list[str]) -> None:
-        resolv = self._host_path_write("/etc/resolv.conf")
-        resolv.parent.mkdir(parents=True, exist_ok=True)
-        content = "".join(f"nameserver {s}\n" for s in dns_servers)
-        resolv.write_text(content)
+        from nitrobox.network import write_dns
+        write_dns(self._host_path_write, dns_servers)
 
     def _start_pasta_rootful(self, config: SandboxConfig) -> None:
-        """Attach pasta to the sandbox's existing network namespace (rootful only).
-
-        The sandbox was created with ``net_isolate=True`` (its own netns via
-        ``unshare(CLONE_NEWNET)``).  Pasta connects to that netns from the host
-        and provides NAT + TCP port forwarding.
-        """
-        pasta_bin = self._find_pasta_bin()
-        if not pasta_bin:
-            raise SandboxKernelError(
-                "port_map requires 'pasta' (from the passt package)."
-            )
-
-        shell_pid = self._persistent_shell.pid
-        netns_name = f"nitrobox-{self._name}"
-
-        # Bind mount the sandbox's netns to /run/netns/ so pasta can open it
-        # (pasta's internal sandboxing blocks direct /proc/{pid}/ns/net access).
-        from nitrobox._core import py_bind_mount, py_umount_lazy
-
-        netns_path = f"/run/netns/{netns_name}"
-        os.makedirs("/run/netns", exist_ok=True)
-        if os.path.exists(netns_path):
-            try:
-                py_umount_lazy(netns_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(netns_path)
-            except OSError:
-                pass
-        fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
-        os.close(fd)
-        py_bind_mount(f"/proc/{shell_pid}/ns/net", netns_path)
-        self._netns_path = netns_path
-
-        cmd: list[str] = [
-            pasta_bin, "--config-net", "--runas", "0:0",
-        ]
-        if not config.ipv6:
-            cmd.append("--ipv4-only")
-        for mapping in config.port_map:
-            cmd.extend(["-t", mapping])
-        cmd.extend([
-            "-u", "none", "-T", "none", "-U", "none",
-            "--dns-forward", "169.254.1.1",
-            "--no-map-gw", "--quiet",
-            "--netns", netns_path,
-            "--map-guest-addr", "169.254.1.2",
-        ])
-
-        out = subprocess.run(cmd, capture_output=True, text=True)
-        if out.returncode != 0:
-            raise SandboxInitError(
-                f"pasta failed (exit={out.returncode}): {out.stderr.strip()}"
-            )
-
+        from nitrobox.network import start_pasta_rootful
+        self._netns_path = start_pasta_rootful(
+            self._name, self._persistent_shell.pid,
+            config.net_isolate, config.port_map or [], config.ipv6,
+            self._env_dir,
+        )
         # Bring up loopback inside the netns
         self._persistent_shell.execute(
             "ip link set lo up 2>/dev/null || true",
             timeout=5,
         )
-        logger.debug("pasta ready (rootful): pid=%d ports=%s", shell_pid, config.port_map)
 
     def _stop_pasta_rootful(self) -> None:
-        """Clean up rootful pasta netns bind mount."""
-        netns_path = getattr(self, "_netns_path", None)
-        if netns_path and os.path.exists(netns_path):
-            from nitrobox._core import py_umount_lazy
-            try:
-                py_umount_lazy(netns_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(netns_path)
-            except OSError:
-                pass
-            self._netns_path = None
+        from nitrobox.network import stop_pasta_rootful
+        stop_pasta_rootful(getattr(self, '_netns_path', None))
+        self._netns_path = None
 
     @staticmethod
     def _find_pasta_bin() -> str | None:
-        """Find the pasta binary (vendored or system)."""
-        vendored = Path(__file__).parent / "_vendor" / "pasta"
-        if vendored.exists() and vendored.is_file():
-            return str(vendored)
-        if shutil.which("pasta"):
-            return "pasta"
-        return None
+        from nitrobox.network import find_pasta_bin
+        return find_pasta_bin()
 
     # ================================================================== #
     #  Reset / cleanup helpers                                             #

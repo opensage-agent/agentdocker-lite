@@ -1,6 +1,6 @@
 //! In-memory image config cache.
 //!
-//! Stores image metadata (CMD, ENTRYPOINT, ENV, WORKDIR, diff_ids)
+//! Stores image metadata (CMD, ENTRYPOINT, ENV, WORKDIR, `diff_ids`)
 //! after the first Docker Engine API call so subsequent lookups are
 //! zero-network, zero-subprocess.
 //!

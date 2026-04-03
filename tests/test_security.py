@@ -263,7 +263,7 @@ class TestEntrypoint:
         )
         assert config.entrypoint is None  # not set yet
 
-        with patch("nitrobox.rootfs.get_image_config", return_value=fake_cfg):
+        with patch("nitrobox.image.store.get_image_config", return_value=fake_cfg):
             box = Sandbox(config, name="ep-auto")
 
         try:

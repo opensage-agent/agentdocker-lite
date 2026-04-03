@@ -33,18 +33,33 @@ const DOCKER_DEFAULT_CAPS: &[u32] = &[
     31, // CAP_SETFCAP
 ];
 
-const CAP_LAST_CAP: u32 = 41;
+/// Read the kernel's actual CAP_LAST_CAP, fall back to a safe upper bound.
+/// Podman: reads `/proc/sys/kernel/cap_last_cap` at runtime.
+fn cap_last_cap() -> u32 {
+    std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(41) // safe fallback: kernel 6.8 = 40
+}
 
 /// Drop all capabilities except Docker defaults + `extra_keep` from bounding set.
-pub fn drop_capabilities(extra_keep: &[u32]) -> io::Result<u32> {
+///
+/// Caps in `extra_drop` are removed even if they appear in the Docker default
+/// set (matching Docker Compose `cap_drop` semantics).
+pub fn drop_capabilities(extra_keep: &[u32], extra_drop: &[u32]) -> io::Result<u32> {
+    let last_cap = cap_last_cap();
     let mut dropped: u32 = 0;
-    for cap_num in 0..=CAP_LAST_CAP {
-        if DOCKER_DEFAULT_CAPS.contains(&cap_num) || extra_keep.contains(&cap_num) {
-            continue;
-        }
-        let cap = CapabilitySet::from_bits_retain(1u64 << cap_num);
-        if rustix::thread::remove_capability_from_bounding_set(cap).is_ok() {
-            dropped += 1;
+    for cap_num in 0..=last_cap {
+        // Drop if: explicitly in extra_drop, OR not in (defaults ∪ extra_keep)
+        let in_defaults = DOCKER_DEFAULT_CAPS.contains(&cap_num);
+        let in_keep = extra_keep.contains(&cap_num);
+        let in_drop = extra_drop.contains(&cap_num);
+
+        if in_drop || !(in_defaults || in_keep) {
+            let cap = CapabilitySet::from_bits_retain(1u64 << cap_num);
+            if rustix::thread::remove_capability_from_bounding_set(cap).is_ok() {
+                dropped += 1;
+            }
         }
     }
     log::debug!("Dropped {dropped} capabilities from bounding set");

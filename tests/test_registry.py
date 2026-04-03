@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -88,6 +89,25 @@ class TestParseImageRef:
         assert repo == "library/python"
         assert tag == "3.11-slim"
 
+    def test_digest_reference(self):
+        reg, repo, ref = parse_image_ref("ubuntu@sha256:abcdef1234567890")
+        assert reg == "registry-1.docker.io"
+        assert repo == "library/ubuntu"
+        assert ref == "sha256:abcdef1234567890"
+
+    def test_digest_with_tag(self):
+        """Digest takes precedence over tag."""
+        reg, repo, ref = parse_image_ref("ubuntu:22.04@sha256:abcdef")
+        assert reg == "registry-1.docker.io"
+        assert repo == "library/ubuntu"
+        assert ref == "sha256:abcdef"
+
+    def test_digest_with_registry(self):
+        reg, repo, ref = parse_image_ref("ghcr.io/org/repo@sha256:abc123")
+        assert reg == "ghcr.io"
+        assert repo == "org/repo"
+        assert ref == "sha256:abc123"
+
 
 # ====================================================================== #
 #  Manifest parsing — mock _registry_request                               #
@@ -145,7 +165,7 @@ class TestGetManifest:
 
     def test_direct_manifest(self):
         """Non-list manifest is returned as-is."""
-        with patch("nitrobox._registry._registry_request") as mock_req:
+        with patch("nitrobox.image.registry._registry_request") as mock_req:
             mock_req.return_value = json.dumps(_IMAGE_MANIFEST).encode()
             result = get_manifest("registry-1.docker.io", "library/ubuntu", "22.04", "token")
         assert result["config"]["digest"] == "sha256:configdigest"
@@ -165,7 +185,7 @@ class TestGetManifest:
                 assert "sha256:amd64digest" in path or "sha256:arm64digest" in path
                 return json.dumps(_IMAGE_MANIFEST).encode()
 
-        with patch("nitrobox._registry._registry_request", side_effect=mock_request):
+        with patch("nitrobox.image.registry._registry_request", side_effect=mock_request):
             with patch("platform.machine", return_value="x86_64"):
                 result = get_manifest("registry-1.docker.io", "library/ubuntu", "22.04", "token")
         assert result == _IMAGE_MANIFEST
@@ -173,7 +193,7 @@ class TestGetManifest:
 
     def test_manifest_list_no_matching_arch_raises(self):
         """Manifest list with no matching architecture raises."""
-        with patch("nitrobox._registry._registry_request") as mock_req:
+        with patch("nitrobox.image.registry._registry_request") as mock_req:
             mock_req.return_value = json.dumps(_MANIFEST_LIST).encode()
             with patch("platform.machine", return_value="riscv64"):
                 with pytest.raises(RuntimeError, match="No linux/riscv64"):
@@ -185,7 +205,7 @@ class TestGetImageConfig:
 
     def test_config_parsing(self):
         """Config blob is downloaded and parsed correctly."""
-        with patch("nitrobox._registry._registry_request") as mock_req:
+        with patch("nitrobox.image.registry._registry_request") as mock_req:
             mock_req.return_value = json.dumps(_IMAGE_CONFIG).encode()
             result = get_image_config_from_registry(
                 "registry-1.docker.io", "library/ubuntu",
@@ -214,8 +234,8 @@ class TestGetConfigFromRegistry:
             else:
                 return json.dumps(_IMAGE_CONFIG).encode()
 
-        with patch("nitrobox._registry._registry_request", side_effect=mock_request):
-            with patch("nitrobox._registry._get_token", return_value="faketoken"):
+        with patch("nitrobox.image.registry._registry_request", side_effect=mock_request):
+            with patch("nitrobox.image.registry._get_token", return_value="faketoken"):
                 result = get_image_metadata_from_registry("ubuntu:22.04")
 
         assert result is not None
@@ -228,7 +248,7 @@ class TestGetConfigFromRegistry:
 
     def test_raises_on_failure(self):
         """Raises when registry is unreachable."""
-        with patch("nitrobox._registry._get_token", side_effect=OSError("no network")):
+        with patch("nitrobox.image.registry._get_token", side_effect=OSError("no network")):
             with pytest.raises(OSError):
                 get_image_metadata_from_registry("nonexistent:latest")
 
@@ -247,6 +267,15 @@ class TestPullImageLayers:
         diff_id = "sha256:" + hashlib.sha256(b"diff-" + content).hexdigest()
         return diff_id, digest, content
 
+    def _make_blob_streaming_mock(self, blobs: dict[str, bytes]):
+        """Return a mock for _download_blob_streaming that writes blobs to file."""
+        def mock_streaming(registry, repo, digest, token, dest, **kwargs):
+            if digest in blobs:
+                Path(dest).write_bytes(blobs[digest])
+            else:
+                Path(dest).write_bytes(b"corrupted-content")
+        return mock_streaming
+
     def test_downloads_needed_layers(self):
         """Only downloads layers in needed_diff_ids set."""
         layer1_content = b"layer1-content-bytes"
@@ -263,21 +292,19 @@ class TestPullImageLayers:
         }
         config = {"rootfs": {"diff_ids": [diff1, diff2]}}
 
-        def mock_request(registry, path, token, accept=None):
+        def mock_request(registry, path, token, accept=None, **kwargs):
             if "manifests" in path:
                 return json.dumps(manifest).encode()
             elif "sha256:cfg" in path:
                 return json.dumps(config).encode()
-            elif digest1.split(":")[1] in path:
-                return blob1
-            elif digest2.split(":")[1] in path:
-                return blob2
             raise ValueError(f"unexpected path: {path}")
 
-        with patch("nitrobox._registry._registry_request", side_effect=mock_request):
-            with patch("nitrobox._registry._get_token", return_value="tok"):
-                # Only request layer 1
-                result = pull_image_layers(f"test:v1", {diff1})
+        mock_streaming = self._make_blob_streaming_mock({digest1: blob1, digest2: blob2})
+
+        with patch("nitrobox.image.registry._registry_request", side_effect=mock_request):
+            with patch("nitrobox.image.registry._download_blob_streaming", side_effect=mock_streaming):
+                with patch("nitrobox.image.registry._get_token", return_value="tok"):
+                    result = pull_image_layers("test:v1", {diff1})
 
         assert diff1 in result
         assert diff2 not in result
@@ -295,18 +322,21 @@ class TestPullImageLayers:
         }
         config = {"rootfs": {"diff_ids": [diff_id]}}
 
-        def mock_request(registry, path, token, accept=None):
+        def mock_request(registry, path, token, accept=None, **kwargs):
             if "manifests" in path:
                 return json.dumps(manifest).encode()
             elif "sha256:cfg" in path:
                 return json.dumps(config).encode()
-            else:
-                return b"corrupted-content"  # wrong data
+            raise ValueError(f"unexpected path: {path}")
 
-        with patch("nitrobox._registry._registry_request", side_effect=mock_request):
-            with patch("nitrobox._registry._get_token", return_value="tok"):
-                with pytest.raises(RuntimeError, match="digest mismatch"):
-                    pull_image_layers("test:v1", {diff_id})
+        def mock_streaming(registry, repo, digest, token, dest, **kwargs):
+            Path(dest).write_bytes(b"corrupted-content")
+
+        with patch("nitrobox.image.registry._registry_request", side_effect=mock_request):
+            with patch("nitrobox.image.registry._download_blob_streaming", side_effect=mock_streaming):
+                with patch("nitrobox.image.registry._get_token", return_value="tok"):
+                    with pytest.raises(RuntimeError, match="digest mismatch"):
+                        pull_image_layers("test:v1", {diff_id})
 
     def test_layer_count_mismatch_raises(self):
         """Mismatched manifest layers vs config diff_ids raises."""
@@ -316,14 +346,14 @@ class TestPullImageLayers:
         }
         config = {"rootfs": {"diff_ids": ["sha256:x", "sha256:y"]}}  # 2 vs 1
 
-        def mock_request(registry, path, token, accept=None):
+        def mock_request(registry, path, token, accept=None, **kwargs):
             if "manifests" in path:
                 return json.dumps(manifest).encode()
             else:
                 return json.dumps(config).encode()
 
-        with patch("nitrobox._registry._registry_request", side_effect=mock_request):
-            with patch("nitrobox._registry._get_token", return_value="tok"):
+        with patch("nitrobox.image.registry._registry_request", side_effect=mock_request):
+            with patch("nitrobox.image.registry._get_token", return_value="tok"):
                 with pytest.raises(RuntimeError, match="layer count mismatch"):
                     pull_image_layers("test:v1", {"sha256:x"})
 

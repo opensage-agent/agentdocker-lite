@@ -311,6 +311,8 @@ class CheckpointManager:
         opts.shell_job = True
         opts.tcp_established = True
         opts.evasive_devices = True
+        opts.file_locks = True
+        opts.ext_unix_sk = True
         opts.ghost_limit = 10 * 1024 * 1024
         opts.orphan_pts_master = True
 
@@ -466,6 +468,8 @@ class CheckpointManager:
         opts.shell_job = True
         opts.tcp_established = True
         opts.evasive_devices = True
+        opts.file_locks = True
+        opts.ext_unix_sk = True
         opts.rst_sibling = True
         opts.orphan_pts_master = True
 

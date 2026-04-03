@@ -380,7 +380,6 @@ class TestDockerClientImagePull:
     def test_pull_small_image(self):
         """Pulls alpine:3.19 successfully via the Docker API."""
         _requires_docker()
-        _skip_if_pull_rate_limited()
         client = DockerClient()
         # Remove if present to force a real pull
         try:
@@ -388,20 +387,29 @@ class TestDockerClientImagePull:
         except DockerAPIError:
             pass
 
-        client.image_pull("alpine:3.19")
+        try:
+            client.image_pull("alpine:3.19")
+        except DockerAPIError as e:
+            if "rate limit" in str(e).lower():
+                pytest.skip("Docker pull rate-limited")
+            raise
         assert client.image_exists("alpine:3.19")
 
     def test_pull_with_separate_tag(self):
         """Pull using image and tag as separate components."""
         _requires_docker()
-        _skip_if_pull_rate_limited()
         client = DockerClient()
         try:
             client.image_remove("alpine:3.19", force=True)
         except DockerAPIError:
             pass
 
-        client.image_pull("alpine", tag="3.19")
+        try:
+            client.image_pull("alpine", tag="3.19")
+        except DockerAPIError as e:
+            if "rate limit" in str(e).lower():
+                pytest.skip("Docker pull rate-limited")
+            raise
         assert client.image_exists("alpine:3.19")
 
     def test_pull_nonexistent_image_raises(self):
@@ -773,13 +781,13 @@ class TestRegistryFirstIntegration:
 
         # Use a fake registry and image that definitely doesn't exist
         # Patch out the registry call to return None and Docker to fail
-        with patch("nitrobox.rootfs.get_client") as mock_get_client:
+        with patch("nitrobox.image.docker.get_client") as mock_get_client:
             mock_client = MagicMock()
             mock_client.image_inspect.side_effect = Exception("no docker")
             mock_get_client.return_value = mock_client
 
             with patch(
-                "nitrobox._registry.get_image_metadata_from_registry",
+                "nitrobox.image.registry.get_image_metadata_from_registry",
                 side_effect=RuntimeError("fake registry error"),
             ):
                 config = get_image_config("totally-fake-registry.invalid/nope:v1")

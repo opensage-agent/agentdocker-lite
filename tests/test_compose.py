@@ -794,8 +794,8 @@ class TestDeployLimits:
 
 
 class TestTopoSort:
-    def test_circular_deps_no_hang(self, tmp_path):
-        """Circular depends_on should not cause infinite loop."""
+    def test_circular_deps_detected(self, tmp_path):
+        """Circular depends_on raises ValueError (matching Docker Compose)."""
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
             services:
@@ -810,9 +810,8 @@ class TestTopoSort:
                 depends_on: [b]
         """))
         services, _ = _parse_compose(compose, {})
-        # Should complete without hanging; order may vary but all included
-        order = _topo_sort(services)
-        assert set(order) == {"a", "b", "c"}
+        with pytest.raises(ValueError, match="cycle"):
+            _topo_sort(services)
 
     def test_missing_dependency(self, tmp_path):
         """depends_on referencing a non-existent service should not crash."""

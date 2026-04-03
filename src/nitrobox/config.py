@@ -291,8 +291,10 @@ class SandboxConfig:
     io_max: str | None = None
     oom_score_adj: int | None = None
     cpuset_cpus: str | None = None
+    cpuset_mems: str | None = None  # NUMA memory nodes (e.g. "0-1")
     cpu_shares: int | None = None  # Docker compat → cpu.weight
     memory_swap: str | None = None  # Docker compat → memory.swap.max
+    memory_high: str | None = None  # Soft memory limit (memory.high)
     ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     # -- Networking --
@@ -305,6 +307,7 @@ class SandboxConfig:
     # -- Security --
     seccomp: bool = True
     cap_add: list[str] = field(default_factory=list)
+    cap_drop: list[str] = field(default_factory=list)
     writable_paths: list[str] | None = None  # Landlock
     readable_paths: list[str] | None = None  # Landlock
     allowed_ports: list[int] | None = None  # Landlock
@@ -327,6 +330,8 @@ class SandboxConfig:
             self.io_max = _parse_io_max(self.io_max)
         if self.shm_size:
             self.shm_size = _parse_size(self.shm_size)
+        if self.memory_high:
+            self.memory_high = _parse_size(self.memory_high)
         if self.memory_swap:
             if self.memory_swap == "-1":
                 self.memory_swap = "max"
@@ -462,7 +467,8 @@ class SandboxConfig:
         # --- Capabilities ---
         if "cap_add" in kwargs:
             cfg_kwargs["cap_add"] = list(kwargs.pop("cap_add"))
-        kwargs.pop("cap_drop", None)  # not mapped (we drop all by default)
+        if "cap_drop" in kwargs:
+            cfg_kwargs["cap_drop"] = list(kwargs.pop("cap_drop"))
 
         # --- Ulimits ---
         if "ulimits" in kwargs:
@@ -671,3 +677,72 @@ class SandboxConfig:
             kwargs["dns"] = dns
 
         return cls(image=image, **kwargs)
+
+
+# ====================================================================== #
+#  Subordinate UID range detection                                         #
+# ====================================================================== #
+
+_cached_subuid_range: tuple[int, int, int] | None = None
+_subuid_detected: bool = False
+
+
+def detect_subuid_range() -> tuple[int, int, int] | None:
+    """Detect subordinate UID range for full uid mapping in user namespaces."""
+    global _cached_subuid_range, _subuid_detected
+
+    if _subuid_detected:
+        return _cached_subuid_range
+
+    import shutil
+
+    if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
+        logger.warning(
+            "newuidmap/newgidmap not found — falling back to single-UID "
+            "mapping. Programs that switch users (apt-get, su, sudo) may "
+            "fail with 'Operation not permitted'. "
+            "Install the 'uidmap' package for full multi-UID support:\n"
+            "  Ubuntu/Debian: sudo apt-get install -y uidmap\n"
+            "  Fedora/RHEL:   sudo dnf install -y shadow-utils\n"
+            "  Arch:          sudo pacman -S shadow"
+        )
+        _subuid_detected = True
+        return None
+
+    import getpass
+    try:
+        username = getpass.getuser()
+    except (KeyError, OSError):
+        _subuid_detected = True
+        return None
+
+    uid = os.getuid()
+
+    try:
+        with open("/etc/subuid") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(":")
+                if len(parts) != 3:
+                    continue
+                if parts[0] == username or parts[0] == str(uid):
+                    sub_start = int(parts[1])
+                    sub_count = int(parts[2])
+                    logger.debug(
+                        "Full uid mapping available: %s:%d:%d",
+                        username, sub_start, sub_count,
+                    )
+                    _cached_subuid_range = (uid, sub_start, sub_count)
+                    _subuid_detected = True
+                    return _cached_subuid_range
+    except FileNotFoundError:
+        pass
+
+    logger.debug(
+        "No /etc/subuid entry for %s. Falling back to root-only mapping.",
+        username,
+    )
+    _subuid_detected = True
+    return None

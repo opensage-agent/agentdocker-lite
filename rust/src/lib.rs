@@ -27,6 +27,7 @@ pub mod pidfd;
 pub mod proc;
 pub mod qmp;
 pub mod security;
+pub mod unpack;
 pub mod userns;
 pub mod whiteout;
 
@@ -84,7 +85,7 @@ fn py_mount_overlay(
     work_dir: &str,
     target: &str,
 ) -> PyResult<()> {
-    mount::mount_overlay(lowerdir_spec, upper_dir, work_dir, target)
+    mount::mount_overlay(lowerdir_spec, upper_dir, work_dir, target, &[])
         .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
@@ -160,10 +161,16 @@ fn py_apply_seccomp_filter() -> PyResult<()> {
 /// Drop capabilities except Docker defaults + `extra_keep`.
 #[gen_stub_pyfunction]
 #[pyfunction]
-#[pyo3(signature = (extra_keep = None))]
-fn py_drop_capabilities(extra_keep: Option<Vec<u32>>) -> PyResult<u32> {
-    security::drop_capabilities(&extra_keep.unwrap_or_default())
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+#[pyo3(signature = (extra_keep = None, extra_drop = None))]
+fn py_drop_capabilities(
+    extra_keep: Option<Vec<u32>>,
+    extra_drop: Option<Vec<u32>>,
+) -> PyResult<u32> {
+    security::drop_capabilities(
+        &extra_keep.unwrap_or_default(),
+        &extra_drop.unwrap_or_default(),
+    )
+    .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 /// Apply Landlock filesystem + network restrictions.
@@ -366,6 +373,7 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
         subuid_range: get_opt_subuid(config, "subuid_range")?,
         seccomp: get_bool(config, "seccomp", true)?,
         cap_add: get_vec_u32(config, "cap_add")?,
+        cap_drop: get_vec_u32(config, "cap_drop")?,
         hostname: get_opt_str(config, "hostname")?,
         read_only: get_bool(config, "read_only", false)?,
         landlock_read_paths: get_vec_str(config, "landlock_read_paths")?,
@@ -521,7 +529,7 @@ fn py_image_store_clear() {
     image_store::clear();
 }
 
-/// Parse a Docker/OCI image reference and return (domain, repository, tag_or_digest).
+/// Parse a Docker/OCI image reference and return (domain, repository, `tag_or_digest`).
 ///
 /// Uses ``container_image_dist_ref`` (Rust port of Go's
 /// ``distribution/reference``) for spec-compliant parsing, then applies
@@ -574,6 +582,45 @@ fn py_parse_image_ref(image: &str) -> PyResult<(String, String, String)> {
     };
 
     Ok((domain, full_path, tag))
+}
+
+// ======================================================================
+// Layer extraction with UID preservation
+// ======================================================================
+
+/// Extract a tar file inside a user namespace with full UID/GID mapping.
+///
+/// This preserves file ownership from Docker image layers — the Podman
+/// approach.  Without this, rootless extraction forces all files to the
+/// extractor's UID, breaking services that check ownership (Postfix, SSH, etc.).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (tar_path, dest, outer_uid, outer_gid, sub_start, sub_count))]
+fn py_extract_tar_in_userns(
+    tar_path: &str,
+    dest: &str,
+    outer_uid: u32,
+    outer_gid: u32,
+    sub_start: u32,
+    sub_count: u32,
+) -> PyResult<()> {
+    unpack::extract_tar_in_userns(tar_path, dest, outer_uid, outer_gid, sub_start, sub_count)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+/// Remove a directory tree containing files with mapped UIDs.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (path, outer_uid, outer_gid, sub_start, sub_count))]
+fn py_rmtree_in_userns(
+    path: &str,
+    outer_uid: u32,
+    outer_gid: u32,
+    sub_start: u32,
+    sub_count: u32,
+) -> PyResult<()> {
+    unpack::rmtree_in_userns(path, outer_uid, outer_gid, sub_start, sub_count)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
 }
 
 // ======================================================================
@@ -644,6 +691,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // image reference parsing
     m.add_function(wrap_pyfunction!(py_parse_image_ref, m)?)?;
+
+    // layer extraction with UID preservation
+    m.add_function(wrap_pyfunction!(py_extract_tar_in_userns, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rmtree_in_userns, m)?)?;
 
     Ok(())
 }

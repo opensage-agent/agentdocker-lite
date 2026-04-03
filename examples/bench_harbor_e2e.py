@@ -23,7 +23,23 @@ Setup:
     docker info
 
 Usage:
-    # Full concurrency sweep (recommended: 100 tasks, 1/4/8/16/32 concurrency)
+    # Docker vs nitrobox fair comparison (40 tasks, concurrency 4)
+    python examples/bench_harbor_e2e.py \\
+        --harbor-dir /path/to/harbor \\
+        --dataset terminal-bench@2.0 \\
+        --agent oracle \\
+        --n-tasks 40 --concurrency 4 \\
+        --envs docker,nitrobox
+
+    # Nitrobox only, skip pre-pull (caches already warm)
+    python examples/bench_harbor_e2e.py \\
+        --harbor-dir /path/to/harbor \\
+        --dataset terminal-bench@2.0 \\
+        --agent oracle \\
+        --n-tasks 40 --concurrency 4 \\
+        --envs nitrobox --skip-pre-pull
+
+    # Full concurrency sweep
     python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset terminal-bench@2.0 \\
@@ -31,31 +47,21 @@ Usage:
         --n-tasks 100 --concurrency 1,4,8,16,32 \\
         --output results.json
 
-    # Quick smoke test (3 tasks, single concurrency)
+    # Quick smoke test (3 tasks)
     python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset terminal-bench@2.0 \\
         --agent oracle \\
         --n-tasks 3 --concurrency 1
 
-    # Claude agent (real LLM, measures end-to-end including inference)
+    # Claude agent (real LLM, end-to-end including inference)
     ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \\
         --harbor-dir /path/to/harbor \\
         --dataset terminal-bench@2.0 \\
         --agent claude-code --model anthropic/claude-sonnet-4-6 \\
         --n-tasks 100 --concurrency 1,4,8,16,32
 
-    # Custom agent with vLLM endpoint
-    MODEL_NAME=my-model MODEL_ENDPOINT=http://localhost:8002/v1 \\
-    python examples/bench_harbor_e2e.py \\
-        --harbor-dir /path/to/harbor \\
-        --dataset swebench-verified \\
-        --agent-import-path my_agent:MyAgent \\
-        --n-tasks 100 --concurrency 1,4,8,16,32
-
 Environment variables:
-    MODEL_NAME         Model name for custom agents
-    MODEL_ENDPOINT     Model API endpoint URL
     ANTHROPIC_API_KEY  API key for Claude agents
 """
 
@@ -209,6 +215,56 @@ def _format_results_table(
     return "\n".join(lines)
 
 
+def _pre_pull_images(harbor_dir: str, dataset: str) -> None:
+    """Pre-pull all Docker images used by the dataset's tasks.
+
+    Scans task.toml files for ``docker_image`` fields and runs
+    ``docker pull`` for each unique image.  This ensures both Docker
+    and nitrobox start from the same baseline (images cached locally)
+    so the benchmark measures pure runtime overhead.
+    """
+    # Ensure dataset tasks are downloaded locally
+    subprocess.run(
+        ["uv", "run", "harbor", "datasets", "download", dataset],
+        cwd=harbor_dir, capture_output=True, text=True,
+    )
+
+    # Scan for task.toml files and extract docker_image values
+    import tomllib
+
+    images: set[str] = set()
+    datasets_dir = Path(harbor_dir) / "datasets"
+    tasks_dir = Path(harbor_dir) / "tasks"
+
+    for search_dir in [datasets_dir, tasks_dir]:
+        if not search_dir.exists():
+            continue
+        for toml_path in search_dir.rglob("task.toml"):
+            try:
+                with open(toml_path, "rb") as f:
+                    cfg = tomllib.load(f)
+                img = (cfg.get("environment") or {}).get("docker_image")
+                if img:
+                    images.add(img)
+            except Exception:
+                pass
+
+    if not images:
+        # Fallback: tasks use Dockerfile builds, need docker build (not pull).
+        # The first benchmark run will pay the build cost equally for both envs.
+        print("  No prebuilt images found (tasks use Dockerfile builds)")
+        return
+
+    print(f"  Found {len(images)} unique image(s): {', '.join(sorted(images))}")
+    for img in sorted(images):
+        print(f"  Pulling {img} ...")
+        subprocess.run(
+            ["docker", "pull", img],
+            capture_output=True, timeout=600,
+        )
+    print(f"  All images cached locally")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Harbor e2e benchmark: Docker vs nitrobox",
@@ -222,6 +278,8 @@ def main():
     parser.add_argument("--concurrency", default="1,4")
     parser.add_argument("--envs", default="docker,nitrobox")
     parser.add_argument("--output", default=None)
+    parser.add_argument("--skip-pre-pull", action="store_true",
+                        help="Skip pre-pulling images (use if caches are already warm)")
     args = parser.parse_args()
 
     concurrency_levels = [int(c) for c in args.concurrency.split(",")]
@@ -239,23 +297,14 @@ def main():
     print(f"  Concurrency: {concurrency_levels}")
     print(f"  Envs:        {env_types}")
 
-    # ── Warmup: run 1 task with each env to populate caches ──────────
-    print(f"\nWarmup (populating Docker layer cache + nitrobox rootfs cache)...")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    for env_type in env_types:
-        warmup_name = f"_warmup_{env_type}_{timestamp}"
-        run_harbor(
-            harbor_dir=args.harbor_dir,
-            dataset=args.dataset,
-            agent=args.agent,
-            agent_import_path=args.agent_import_path,
-            model=args.model,
-            env_type=env_type,
-            n_tasks=1,
-            n_concurrent=1,
-            job_name=warmup_name,
-        )
-        print(f"  {env_type}: warmed up")
+
+    # ── Pre-pull: ensure all images are in Docker local cache ────────
+    if not args.skip_pre_pull:
+        print(f"\nPre-pulling images (ensures fair comparison)...")
+        _pre_pull_images(args.harbor_dir, args.dataset)
+    else:
+        print(f"\nSkipping pre-pull (--skip-pre-pull)")
 
     # ── Benchmark runs ───────────────────────────────────────────────
     all_results = {}

@@ -9,6 +9,26 @@ import subprocess
 import pytest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_previous_garbage():
+    """Clean up garbage dirs from previous pytest runs.
+
+    Pytest moves old tmp dirs to ``garbage-*`` on startup, but can't
+    delete files with mapped UIDs (from userns layer extraction).
+    Clean them up here with ``rmtree_mapped`` which enters a userns.
+    """
+    import glob
+    from pathlib import Path
+
+    garbage_root = Path(f"/tmp/pytest-of-{os.environ.get('USER', 'root')}")
+    for garbage in glob.glob(str(garbage_root / "garbage-*")):
+        try:
+            from nitrobox.image.layers import rmtree_mapped
+            rmtree_mapped(garbage)
+        except Exception:
+            pass
+
+
 @pytest.fixture(scope="session")
 def shared_cache_dir(tmp_path_factory):
     """Session-scoped rootfs cache shared by all tests.
@@ -18,8 +38,9 @@ def shared_cache_dir(tmp_path_factory):
     """
     cache = tmp_path_factory.mktemp("rootfs_cache")
     yield str(cache)
-    # Layers are read-only dirs; shutil handles them fine.
-    shutil.rmtree(str(cache), ignore_errors=True)
+    # Layers may contain files with mapped UIDs (userns extraction).
+    from nitrobox.image.layers import rmtree_mapped
+    rmtree_mapped(str(cache))
 
 
 def _find_stale_mounts(path: str) -> list[str]:
@@ -89,7 +110,8 @@ def _assert_clean_after_test(request, tmp_path):
 
     # 3. Verify tmp_path is cleanly removable (no stuck files)
     try:
-        shutil.rmtree(str(envs_dir))
+        from nitrobox.image.layers import rmtree_mapped
+        rmtree_mapped(str(envs_dir))
     except OSError as e:
         errors.append(f"Cannot clean env dir: {e}")
 

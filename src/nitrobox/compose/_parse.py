@@ -17,22 +17,65 @@ logger = logging.getLogger(__name__)
 #  Variable substitution                                               #
 # ------------------------------------------------------------------ #
 
-# Matches ${VAR}, ${VAR:-default}, ${VAR-default}, and $$
+# Matches ${VAR}, ${VAR:-default}, ${VAR-default}, ${VAR:+alt}, ${VAR+alt},
+# ${VAR:?err}, ${VAR?err}, $VAR, and $$ (escape).
 _VAR_RE = re.compile(r"\$\$|\$\{([^}]+)\}|\$([A-Za-z_]\w*)")
 
 
 def _substitute(text: str, env: dict[str, str]) -> str:
-    """Resolve ``${VAR:-default}`` patterns in *text*."""
+    """Resolve compose-spec variable substitution patterns in *text*.
+
+    Supported operators (matching compose-spec):
+    - ``${VAR:-default}`` — default if unset **or empty**
+    - ``${VAR-default}``  — default if unset only
+    - ``${VAR:+replacement}`` — replacement if set **and non-empty**
+    - ``${VAR+replacement}``  — replacement if set
+    - ``${VAR:?error}`` — raise if unset **or empty**
+    - ``${VAR?error}``  — raise if unset
+    - ``$$`` → literal ``$``
+    """
 
     def _repl(m: re.Match) -> str:
         if m.group(0) == "$$":
             return "$"
         name: str = m.group(1) or m.group(2) or ""
-        # Handle ${VAR:-default} and ${VAR-default}
-        for sep in (":-", "-"):
-            if sep in name:
-                var, default = name.split(sep, 1)
-                return env.get(var, default)
+
+        # ${VAR:-default} — default if unset or empty
+        if ":-" in name:
+            var, default = name.split(":-", 1)
+            val = env.get(var)
+            return default if val is None or val == "" else val
+        # ${VAR-default} — default if unset only
+        if "-" in name:
+            var, default = name.split("-", 1)
+            return env.get(var, default)
+        # ${VAR:+replacement} — replacement if set and non-empty
+        if ":+" in name:
+            var, repl = name.split(":+", 1)
+            val = env.get(var)
+            return repl if val is not None and val != "" else ""
+        # ${VAR+replacement} — replacement if set (even if empty)
+        if "+" in name:
+            var, repl = name.split("+", 1)
+            return repl if var in env else ""
+        # ${VAR:?error} — error if unset or empty
+        if ":?" in name:
+            var, err = name.split(":?", 1)
+            val = env.get(var)
+            if val is None or val == "":
+                raise ValueError(
+                    f"Variable {var!r} is required: {err}"
+                )
+            return val
+        # ${VAR?error} — error if unset
+        if "?" in name:
+            var, err = name.split("?", 1)
+            if var not in env:
+                raise ValueError(
+                    f"Variable {var!r} is required: {err}"
+                )
+            return env[var]
+
         return env.get(name, "")
 
     return _VAR_RE.sub(_repl, text)
@@ -77,7 +120,9 @@ class _Service:
     restart: str | None = None
     security_opt: list[str] = field(default_factory=list)
     cap_add: list[str] = field(default_factory=list)
+    cap_drop: list[str] = field(default_factory=list)
     privileged: bool = False
+    stop_signal: str | None = None
     stop_grace_period: str | None = None
     ulimits: dict[str, tuple[int, int]] = field(default_factory=dict)
     # maps resource name → (soft, hard), e.g. {"nofile": (65535, 65535)}
@@ -148,14 +193,41 @@ def _parse_ulimits(raw: Any) -> dict[str, tuple[int, int]]:
 
 
 def _parse_ports(raw: Any) -> list[str]:
-    """Parse ports into ``host:container`` strings."""
+    """Parse ports into ``host:container`` strings.
+
+    Supports compose-spec short form (``"8080:80"``), long form
+    (``{target: 80, published: 8080}``), and port ranges
+    (``"8000-9000:8000-9000"``).
+    """
     if not raw:
         return []
     result: list[str] = []
     for p in raw:
+        if isinstance(p, dict):
+            # Long form: {target: 80, published: 8080, protocol: tcp}
+            target = p.get("target", "")
+            published = p.get("published", target)
+            result.append(f"{published}:{target}")
+            continue
         p = str(p)
         # Strip protocol suffix for port_map (pasta handles TCP)
         p = re.sub(r"/(tcp|udp)$", "", p)
+        # Expand port ranges: "8000-9000:8000-9000" → individual mappings
+        m = re.match(
+            r"^(?:(\S+):)?(\d+)-(\d+):(\d+)-(\d+)$", p,
+        )
+        if m:
+            bind_addr = m.group(1)
+            host_start, host_end = int(m.group(2)), int(m.group(3))
+            cont_start, cont_end = int(m.group(4)), int(m.group(5))
+            if host_end - host_start == cont_end - cont_start:
+                for offset in range(host_end - host_start + 1):
+                    hp, cp = host_start + offset, cont_start + offset
+                    if bind_addr:
+                        result.append(f"{bind_addr}:{hp}:{cp}")
+                    else:
+                        result.append(f"{hp}:{cp}")
+                continue
         result.append(p)
     return result
 
@@ -165,7 +237,8 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "image", "build", "command", "entrypoint", "environment",
     "volumes", "ports", "devices", "depends_on", "healthcheck",
     "network_mode", "dns", "hostname", "working_dir", "restart",
-    "security_opt", "cap_add", "privileged", "stop_grace_period",
+    "security_opt", "cap_add", "cap_drop", "privileged",
+    "stop_signal", "stop_grace_period",
     "ulimits", "shm_size", "tmpfs", "cpu_shares",
     "mem_limit", "memswap_limit", "env_file",
     # Functional support
@@ -316,7 +389,9 @@ def _parse_compose(
             restart=svc.get("restart"),
             security_opt=[str(s) for s in (svc.get("security_opt") or [])],
             cap_add=[str(c) for c in (svc.get("cap_add") or [])],
+            cap_drop=[str(c) for c in (svc.get("cap_drop") or [])],
             privileged=bool(svc.get("privileged")),
+            stop_signal=svc.get("stop_signal"),
             stop_grace_period=svc.get("stop_grace_period"),
             ulimits=_parse_ulimits(svc.get("ulimits")),
             networks=list(svc["networks"]) if isinstance(svc.get("networks"), (list, dict)) else [],
@@ -334,20 +409,30 @@ def _parse_compose(
 
 
 def _topo_sort(services: dict[str, _Service]) -> list[str]:
-    """Topological sort by depends_on (depth-first)."""
+    """Topological sort by depends_on (depth-first) with cycle detection.
+
+    Raises ``ValueError`` if a dependency cycle is found (matching
+    Docker Compose's ``dependencies.go`` cycle detection).
+    """
     visited: set[str] = set()
+    in_stack: set[str] = set()  # nodes currently on the recursion stack
     order: list[str] = []
 
-    def _visit(name: str) -> None:
+    def _visit(name: str, path: list[str]) -> None:
+        if name in in_stack:
+            cycle = " -> ".join(path + [name])
+            raise ValueError(f"Dependency cycle detected: {cycle}")
         if name in visited:
             return
         visited.add(name)
+        in_stack.add(name)
         svc = services.get(name)
         if svc:
             for dep in svc.depends_on:
-                _visit(dep)
+                _visit(dep, path + [name])
+        in_stack.discard(name)
         order.append(name)
 
     for name in services:
-        _visit(name)
+        _visit(name, [])
     return order

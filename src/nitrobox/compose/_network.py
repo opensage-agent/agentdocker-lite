@@ -10,9 +10,9 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 
-from nitrobox.sandbox import Sandbox
+from nitrobox.config import detect_subuid_range
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class SharedNetwork:
         self.dns_forward_ips: list[str] = []
         self.guest_ip: str | None = None
         # Detect subuid range (reuse rootless sandbox logic)
-        self._subuid_range = Sandbox._detect_subuid_range()
+        self._subuid_range = detect_subuid_range()
 
         # Create sentinel with userns + netns
         unshare_cmd = ["unshare", "--user", "--net", "--fork"]
@@ -132,8 +132,13 @@ class SharedNetwork:
             pasta_bin, "--config-net",
             "--ipv4-only",
         ]
-        for mapping in port_map:
-            cmd.extend(["-t", mapping])
+        # Podman: explicit port mappings, or -t none to disable default
+        # TCP forwarding (pasta forwards ALL host TCP ports otherwise).
+        if port_map:
+            for mapping in port_map:
+                cmd.extend(["-t", mapping])
+        else:
+            cmd.extend(["-t", "none"])
         cmd.extend([
             "-u", "none", "-T", "none", "-U", "none",
             "--dns-forward", "169.254.1.1",
@@ -286,16 +291,33 @@ def _parse_pasta_guest_ip(output: str) -> str | None:
 
 
 def _parse_duration(s: str | int | float) -> float:
-    """Parse compose duration string (e.g. ``"30s"``, ``"2m"``) to seconds."""
+    """Parse compose duration string to seconds.
+
+    Supports single units (``"30s"``, ``"2m"``) and compound durations
+    (``"1m30s"``, ``"1h2m3s"``) matching the compose-spec/Go
+    ``time.ParseDuration`` format.
+    """
     if isinstance(s, (int, float)):
         return float(s)
     s = str(s).strip()
-    m = re.match(r"^(\d+(?:\.\d+)?)\s*(s|ms|m|h)?$", s)
-    if not m:
-        return 30.0
-    val = float(m.group(1))
-    unit = m.group(2) or "s"
-    return val * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[unit]
+
+    _UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+
+    # Try compound duration first: "1h2m30s", "1m30s500ms"
+    total = 0.0
+    found = False
+    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*(h|m(?!s)|s|ms)", s):
+        total += float(m.group(1)) * _UNITS[m.group(2)]
+        found = True
+    if found:
+        return total
+
+    # Simple number without unit → seconds
+    m = re.match(r"^(\d+(?:\.\d+)?)$", s)
+    if m:
+        return float(m.group(1))
+
+    return 30.0
 
 
 # ------------------------------------------------------------------ #
