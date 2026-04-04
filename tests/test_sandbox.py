@@ -956,6 +956,47 @@ class TestMountOverlay:
         result = _check_new_mount_api()
         assert isinstance(result, bool)
 
+    def test_deep_layer_overlay(self, tmp_path):
+        """Mount overlay with 50 layers — exercises PAGE_SIZE fallback.
+
+        Matching Podman's TestOverlay128LayerRead: creates many layers,
+        mounts overlay, and verifies files from bottom and top layers
+        are readable.  Requires root (overlay mount is a privileged op).
+        """
+        _requires_root()
+        from nitrobox._core import py_mount_overlay, py_umount_lazy
+
+        n_layers = 50
+        layers_dir = tmp_path / "layers"
+        layers_dir.mkdir()
+
+        # Create N layer dirs with 64-char names (like full SHA256)
+        layer_paths = []
+        for i in range(n_layers):
+            layer = layers_dir / f"{i:064x}"
+            layer.mkdir()
+            if i == 0:
+                (layer / "bottom.txt").write_text("from layer 0")
+            if i == n_layers - 1:
+                (layer / "top.txt").write_text("from top layer")
+            layer_paths.append(str(layer))
+
+        upper = tmp_path / "upper"
+        work = tmp_path / "work"
+        merged = tmp_path / "merged"
+        for d in (upper, work, merged):
+            d.mkdir()
+
+        # lowerdir: first in list = topmost layer
+        lowerdir_spec = ":".join(reversed(layer_paths))
+        py_mount_overlay(lowerdir_spec, str(upper), str(work), str(merged))
+
+        try:
+            assert (merged / "bottom.txt").read_text() == "from layer 0"
+            assert (merged / "top.txt").read_text() == "from top layer"
+        finally:
+            py_umount_lazy(str(merged))
+
 
 # ------------------------------------------------------------------ #
 #  Port mapping (pasta networking)                                      #

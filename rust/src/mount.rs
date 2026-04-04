@@ -152,14 +152,159 @@ fn mount_overlay_legacy(
         options.push_str(opt);
     }
 
-    nix::mount::mount(
-        Some("overlay"),
-        target,
-        Some("overlay"),
-        nix::mount::MsFlags::empty(),
-        Some(options.as_str()),
-    )
-    .map_err(|e| io::Error::from_raw_os_error(e as i32))
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+
+    if options.len() < page_size {
+        // Fast path: mount data fits in a page
+        return nix::mount::mount(
+            Some("overlay"),
+            target,
+            Some("overlay"),
+            nix::mount::MsFlags::empty(),
+            Some(options.as_str()),
+        )
+        .map_err(|e| io::Error::from_raw_os_error(e as i32));
+    }
+
+    // Podman trick: fork, chdir to common prefix, use relative paths.
+    // Find common prefix of all lowerdirs to shorten paths.
+    let lowers: Vec<&str> = lowerdir_spec.split(':').collect();
+    let common = common_path_prefix(&lowers);
+    if common.is_empty() {
+        return Err(io::Error::other(format!(
+            "overlay mount data ({} bytes) exceeds page size ({page_size}), \
+             no common prefix for relative path fallback",
+            options.len(),
+        )));
+    }
+
+    let rel_lowers: Vec<String> = lowers
+        .iter()
+        .map(|l| l.strip_prefix(&common).unwrap_or(l).trim_start_matches('/').to_string())
+        .collect();
+    let rel_spec = rel_lowers.join(":");
+    let mut rel_options = format!(
+        "lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}",
+    );
+    for opt in extra_opts {
+        rel_options.push(',');
+        rel_options.push_str(opt);
+    }
+
+    log::debug!(
+        "overlay legacy: mount data too long ({} bytes), using chdir to {common} ({} bytes)",
+        options.len(), rel_options.len(),
+    );
+
+    // Fork + chdir + mount (matching Podman's mountOverlayFrom).
+    // Two-level fallback:
+    //   1. chdir to common prefix, use relative paths
+    //   2. open() each lowerdir as fd, chdir to /proc/self/fd, use fd numbers
+    let lowers_clone = lowers.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let upper_s = upper_dir.to_string();
+    let work_s = work_dir.to_string();
+    let target_s = target.to_string();
+    let extra_s: Vec<String> = extra_opts.iter().map(|s| s.to_string()).collect();
+
+    match unsafe { nix::unistd::fork() } {
+        Ok(nix::unistd::ForkResult::Child) => {
+            let code = mount_overlay_from_child(
+                &common, &lowers_clone, &upper_s, &work_s, &target_s, &extra_s, page_size,
+            );
+            unsafe { libc::_exit(code) };
+        }
+        Ok(nix::unistd::ForkResult::Parent { child }) => {
+            let status = nix::sys::wait::waitpid(child, None)
+                .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+            match status {
+                nix::sys::wait::WaitStatus::Exited(_, 0) => Ok(()),
+                _ => Err(io::Error::other(
+                    "overlay mount failed in chdir child process",
+                )),
+            }
+        }
+        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+/// Child process: try relative paths, then fd-based paths (matching Podman).
+fn mount_overlay_from_child(
+    common: &str,
+    lowers: &[String],
+    upper_dir: &str,
+    work_dir: &str,
+    target: &str,
+    extra_opts: &[String],
+    page_size: usize,
+) -> i32 {
+    // Level 1: chdir to common prefix, use relative lowerdir paths
+    let _ = nix::unistd::chdir(common);
+    let rel_lowers: Vec<String> = lowers
+        .iter()
+        .map(|l| l.strip_prefix(common).unwrap_or(l).trim_start_matches('/').to_string())
+        .collect();
+    let rel_spec = rel_lowers.join(":");
+    let mut opts = format!("lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}");
+    for o in extra_opts { opts.push(','); opts.push_str(o); }
+
+    if opts.len() < page_size {
+        let ret = nix::mount::mount(
+            Some("overlay"), target, Some("overlay"),
+            nix::mount::MsFlags::empty(), Some(opts.as_str()),
+        );
+        return if ret.is_ok() { 0 } else { 1 };
+    }
+
+    // Level 2: open each lowerdir as fd, use /proc/self/fd/<n> paths
+    // (matching Podman mount.go:139-163)
+    let mut fds: Vec<std::os::fd::OwnedFd> = Vec::new();
+    for lower in lowers {
+        match nix::fcntl::open(lower.as_str(), nix::fcntl::OFlag::O_RDONLY, nix::sys::stat::Mode::empty()) {
+            Ok(fd) => fds.push(fd),
+            Err(_) => return 1,
+        }
+    }
+    let fd_lowers: Vec<String> = fds.iter().map(|fd| {
+        use std::os::fd::AsRawFd;
+        fd.as_raw_fd().to_string()
+    }).collect();
+    let fd_spec = fd_lowers.join(":");
+    opts = format!("lowerdir={fd_spec},upperdir={upper_dir},workdir={work_dir}");
+    for o in extra_opts { opts.push(','); opts.push_str(o); }
+
+    if opts.len() >= page_size {
+        return 1; // still too long, give up
+    }
+
+    let _ = nix::unistd::chdir("/proc/self/fd");
+    let ret = nix::mount::mount(
+        Some("overlay"), target, Some("overlay"),
+        nix::mount::MsFlags::empty(), Some(opts.as_str()),
+    );
+    if ret.is_ok() { 0 } else { 1 }
+}
+
+/// Find the longest common directory prefix among paths.
+fn common_path_prefix(paths: &[&str]) -> String {
+    if paths.is_empty() {
+        return String::new();
+    }
+    let first = paths[0];
+    let mut end = first.len();
+    for p in &paths[1..] {
+        end = end.min(p.len());
+        for (i, (a, b)) in first.bytes().zip(p.bytes()).enumerate() {
+            if a != b || i >= end {
+                end = i;
+                break;
+            }
+        }
+    }
+    // Truncate to last '/'
+    match first[..end].rfind('/') {
+        Some(i) => first[..=i].to_string(),
+        None => String::new(),
+    }
 }
 
 // --- public API ---

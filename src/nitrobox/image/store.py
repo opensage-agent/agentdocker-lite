@@ -70,17 +70,19 @@ def _docker_inspect_to_config(info: dict) -> ImageConfig:
 
 
 def _safe_cache_key(diff_id: str) -> str:
-    """Convert a diff_id like 'sha256:abc...' to a short filesystem-safe key.
+    """Convert a diff_id like 'sha256:abc...' to a filesystem-safe key.
 
-    Uses first 16 hex chars of the hash for brevity.  The new mount API
-    (``fsconfig``) has a ~256-byte limit per lowerdir parameter, so full
-    64-char SHA256 hashes cause mount failures with many layers.
-    16 hex chars = 64 bits of collision resistance — sufficient for a
-    local per-user cache.
+    Uses the full 64-char hex hash.  The new mount API (``fsconfig``)
+    has a ~256-byte limit per ``lowerdir+`` parameter, but a typical
+    path like ``~/.cache/nitrobox/rootfs/layers/<64chars>`` is ~90
+    bytes — well within the limit.
+
+    Podman uses random IDs for layer directories; we use the full
+    diff_id hash for content-addressable deduplication.
     """
-    # "sha256:abcdef..." → "abcdef..."[:16]
+    # "sha256:abcdef..." → "abcdef..."
     _, _, hexpart = diff_id.partition(":")
-    return hexpart[:16] if hexpart else diff_id.replace(":", "_")[:16]
+    return hexpart if hexpart else diff_id.replace(":", "_")
 
 
 # ====================================================================== #
