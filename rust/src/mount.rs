@@ -200,11 +200,11 @@ fn mount_overlay_legacy(
     // Two-level fallback:
     //   1. chdir to common prefix, use relative paths
     //   2. open() each lowerdir as fd, chdir to /proc/self/fd, use fd numbers
-    let lowers_clone = lowers.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let lowers_clone = lowers.iter().map(ToString::to_string).collect::<Vec<_>>();
     let upper_s = upper_dir.to_string();
     let work_s = work_dir.to_string();
     let target_s = target.to_string();
-    let extra_s: Vec<String> = extra_opts.iter().map(|s| s.to_string()).collect();
+    let extra_s: Vec<String> = extra_opts.iter().map(ToString::to_string).collect();
 
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
@@ -252,7 +252,7 @@ fn mount_overlay_from_child(
             Some("overlay"), target, Some("overlay"),
             nix::mount::MsFlags::empty(), Some(opts.as_str()),
         );
-        return if ret.is_ok() { 0 } else { 1 };
+        return i32::from(ret.is_err());
     }
 
     // Level 2: open each lowerdir as fd, use /proc/self/fd/<n> paths
@@ -281,7 +281,7 @@ fn mount_overlay_from_child(
         Some("overlay"), target, Some("overlay"),
         nix::mount::MsFlags::empty(), Some(opts.as_str()),
     );
-    if ret.is_ok() { 0 } else { 1 }
+    i32::from(ret.is_err())
 }
 
 /// Find the longest common directory prefix among paths.
@@ -328,7 +328,7 @@ pub fn mount_overlay(
 
     // Build effective options: caller's extra_opts + auto-detected overlay params
     let mut opts: Vec<&str> = extra_opts.to_vec();
-    let has_userxattr = opts.iter().any(|o| *o == "userxattr");
+    let has_userxattr = opts.contains(&"userxattr");
 
     if overlay_supports_index() {
         opts.push("index=off");

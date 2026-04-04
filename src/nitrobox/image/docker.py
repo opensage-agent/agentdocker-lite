@@ -21,6 +21,7 @@ import logging
 import os
 import socket
 import tarfile
+import threading
 from pathlib import Path
 from typing import IO, Any
 
@@ -516,8 +517,6 @@ class DockerClient:
 # ------------------------------------------------------------------
 #  Module-level singleton
 # ------------------------------------------------------------------
-
-import threading
 
 _client: DockerClient | None = None
 _client_lock = threading.Lock()

@@ -33,7 +33,7 @@ const DOCKER_DEFAULT_CAPS: &[u32] = &[
     31, // CAP_SETFCAP
 ];
 
-/// Read the kernel's actual CAP_LAST_CAP, fall back to a safe upper bound.
+/// Read the kernel's actual `CAP_LAST_CAP`, fall back to a safe upper bound.
 /// Podman: reads `/proc/sys/kernel/cap_last_cap` at runtime.
 fn cap_last_cap() -> u32 {
     std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")

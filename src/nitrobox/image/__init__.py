@@ -14,4 +14,5 @@ __all__ = [
     "prepare_rootfs_layers_from_docker",
     "prepare_rootfs_from_docker",
     "prepare_btrfs_rootfs_from_docker",
+    "rmtree_mapped",
 ]

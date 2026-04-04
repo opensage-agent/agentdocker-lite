@@ -440,8 +440,6 @@ def _extract_single_layer_locked(
     layers_dir: Path,
 ) -> None:
     """Extract a single layer tarball with file locking for concurrent safety."""
-    import shutil
-
     lock_path = layers_dir / f".{layer_dir.name}.lock"
     tmp_dir = layer_dir.with_suffix(".extracting")
     with open(lock_path, "w") as lock_fd:
