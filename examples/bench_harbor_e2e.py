@@ -98,6 +98,7 @@ def run_harbor(
         "--n-attempts", "1",
         "-l", str(n_tasks),
         "--job-name", job_name,
+        "-y",
     ]
     if agent:
         cmd.extend(["-a", agent])
@@ -224,18 +225,22 @@ def _format_results_table(
 
 
 def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
-    """Ensure all images are built/pulled before the timed benchmark.
+    """Build all Docker images locally before the timed benchmark.
 
-    Runs ``harbor run -e docker -a nop --no-delete`` which triggers
-    harbor's image resolution (Dockerfile build or registry pull) for
-    every task.  ``--no-delete`` keeps containers so Docker retains the
-    pulled images in its local cache (``--delete`` runs
-    ``docker compose down --rmi all`` which removes them).
+    Runs ``harbor run -e docker -a nop --force-build --no-delete``
+    which builds every task's Dockerfile locally via Docker.  This
+    avoids Docker Hub rate limits (429 errors) that occur when pulling
+    89+ prebuilt images concurrently.
 
-    Both Docker and nitrobox subsequent runs can then use the locally
-    cached images without hitting the registry again.
+    The ``--force-build`` flag forces Dockerfile builds even when a
+    prebuilt ``docker_image`` is specified in ``task.toml``.
+    ``--no-delete`` keeps images in Docker's local cache (without it,
+    ``docker compose down --rmi all`` would remove them).
+
+    Both Docker and nitrobox subsequent runs use these locally built
+    images without hitting any registry.
     """
-    print(f"  Running: harbor run -e docker -a nop --no-delete -l {n_tasks} ...")
+    print(f"  Running: harbor run -e docker -a nop --force-build --no-delete -l {n_tasks} ...")
     result = subprocess.run(
         [
             "uv", "run", "harbor", "run",
@@ -245,6 +250,7 @@ def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
             "-l", str(n_tasks),
             "--n-concurrent", "4",
             "--n-attempts", "1",
+            "--force-build",
             "--no-delete",
             "--job-name", f"_prebuild_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         ],
@@ -255,7 +261,7 @@ def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
         print(f"  [WARN] pre-build exited with code {result.returncode}")
         print(f"  stderr: {result.stderr[-300:]}")
     else:
-        print("  Images ready in Docker local cache")
+        print("  Images built and cached in Docker")
 
 
 def main():
