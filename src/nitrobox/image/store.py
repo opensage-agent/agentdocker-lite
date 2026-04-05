@@ -107,17 +107,7 @@ def _get_image_diff_ids(image_name: str) -> list[str]:
 
     errors: list[tuple[str, Exception]] = []
 
-    # 2. Registry API — single call for both diff_ids and config (~100ms)
-    from nitrobox.image.registry import get_image_metadata_from_registry
-    try:
-        metadata = get_image_metadata_from_registry(image_name)
-        if metadata.get("diff_ids"):
-            _image_store_populate(image_name, metadata)
-            return metadata["diff_ids"]
-    except Exception as exc:
-        errors.append(("registry", exc))
-
-    # 3. Docker API — for locally-built images not on any registry
+    # 2. Docker API — fastest for locally cached images (~5ms)
     from nitrobox.image.docker import get_client
     try:
         info = get_client().image_inspect(image_name)
@@ -128,6 +118,16 @@ def _get_image_diff_ids(image_name: str) -> list[str]:
             return diff_ids
     except Exception as exc:
         errors.append(("docker", exc))
+
+    # 3. Registry API — fallback for images not in local Docker (~100ms)
+    from nitrobox.image.registry import get_image_metadata_from_registry
+    try:
+        metadata = get_image_metadata_from_registry(image_name)
+        if metadata.get("diff_ids"):
+            _image_store_populate(image_name, metadata)
+            return metadata["diff_ids"]
+    except Exception as exc:
+        errors.append(("registry", exc))
 
     detail = "; ".join(f"{src}: {exc}" for src, exc in errors)
     raise RuntimeError(
@@ -141,8 +141,8 @@ def get_image_config(image_name: str) -> dict | None:
     Resolution order:
       1. Rust in-memory ImageStore (~0ms)
       2. Disk manifest cache — persisted config from prior rootfs prep
-      3. Registry API — single call for diff_ids + config (~100ms)
-      4. Docker API — for locally-built images not on any registry
+      3. Docker API — fast for locally cached images (~5ms)
+      4. Registry API — fallback for images not in Docker (~100ms)
 
     Returns a dict with keys: ``cmd``, ``entrypoint``, ``env``,
     ``working_dir``, ``exposed_ports``.  Returns ``None`` only when
@@ -159,22 +159,22 @@ def get_image_config(image_name: str) -> dict | None:
         _image_store_populate(image_name, disk_cfg)
         return disk_cfg
 
-    # 3. Registry API — single call for diff_ids + config (~100ms)
-    from nitrobox.image.registry import get_image_metadata_from_registry
-    try:
-        metadata = get_image_metadata_from_registry(image_name)
-        _image_store_populate(image_name, metadata)
-        return metadata
-    except Exception:
-        pass
-
-    # 4. Docker API — for locally-built images not on any registry
+    # 3. Docker API — fast for locally cached images (~5ms)
     from nitrobox.image.docker import get_client
     try:
         info = get_client().image_inspect(image_name)
         result = _docker_inspect_to_config(info)
         _image_store_populate(image_name, result)
         return result
+    except Exception:
+        pass
+
+    # 4. Registry API — fallback for images not in Docker (~100ms)
+    from nitrobox.image.registry import get_image_metadata_from_registry
+    try:
+        metadata = get_image_metadata_from_registry(image_name)
+        _image_store_populate(image_name, metadata)
+        return metadata
     except Exception:
         pass
 

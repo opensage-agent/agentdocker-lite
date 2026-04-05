@@ -86,6 +86,8 @@ def run_harbor(
     n_tasks: int,
     n_concurrent: int,
     job_name: str,
+    include_tasks: list[str] | None = None,
+    exclude_tasks: list[str] | None = None,
 ) -> dict:
     """Run harbor and return timing results."""
     cmd = [
@@ -99,6 +101,12 @@ def run_harbor(
     ]
     if agent:
         cmd.extend(["-a", agent])
+    if include_tasks:
+        for t in include_tasks:
+            cmd.extend(["-i", t])
+    if exclude_tasks:
+        for t in exclude_tasks:
+            cmd.extend(["-x", t])
     if agent_import_path:
         cmd.extend(["--agent-import-path", agent_import_path])
     if model:
@@ -218,14 +226,16 @@ def _format_results_table(
 def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
     """Ensure all images are built/pulled before the timed benchmark.
 
-    Runs ``harbor run -e docker -a nop -l <n_tasks>`` which triggers
-    harbor's own image resolution (Dockerfile build or registry pull)
-    for every task that will be benchmarked.  The ``nop`` agent does
-    nothing, so the only cost is environment setup.  The resulting
-    images land in Docker's local cache, which both Docker and nitrobox
-    environments can use.
+    Runs ``harbor run -e docker -a nop --no-delete`` which triggers
+    harbor's image resolution (Dockerfile build or registry pull) for
+    every task.  ``--no-delete`` keeps containers so Docker retains the
+    pulled images in its local cache (``--delete`` runs
+    ``docker compose down --rmi all`` which removes them).
+
+    Both Docker and nitrobox subsequent runs can then use the locally
+    cached images without hitting the registry again.
     """
-    print(f"  Running: harbor run -e docker -a nop -l {n_tasks} ...")
+    print(f"  Running: harbor run -e docker -a nop --no-delete -l {n_tasks} ...")
     result = subprocess.run(
         [
             "uv", "run", "harbor", "run",
@@ -235,6 +245,7 @@ def _pre_build(harbor_dir: str, dataset: str, n_tasks: int) -> None:
             "-l", str(n_tasks),
             "--n-concurrent", "4",
             "--n-attempts", "1",
+            "--no-delete",
             "--job-name", f"_prebuild_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         ],
         cwd=harbor_dir, env={**os.environ},
@@ -262,6 +273,10 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("--skip-pre-build", action="store_true",
                         help="Skip pre-building images (use if caches are already warm)")
+    parser.add_argument("-i", "--include-task", action="append", default=None,
+                        help="Only run specific task(s) by name (repeatable)")
+    parser.add_argument("-x", "--exclude-task", action="append", default=None,
+                        help="Exclude specific task(s) by name (repeatable)")
     args = parser.parse_args()
 
     concurrency_levels = [int(c) for c in args.concurrency.split(",")]
@@ -306,6 +321,8 @@ def main():
                 n_tasks=args.n_tasks,
                 n_concurrent=c,
                 job_name=job_name,
+                include_tasks=args.include_task,
+                exclude_tasks=args.exclude_task,
             )
             all_results[key] = r
             print(
