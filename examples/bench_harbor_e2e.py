@@ -10,12 +10,36 @@ Setup:
     docker login   # avoid Docker Hub rate limits
 
 Usage:
-    # Full TB2 comparison
+    # Oracle agent — pure sandbox overhead (no LLM)
     python examples/bench_harbor_e2e.py \
         --harbor-dir /path/to/harbor \
         --dataset terminal-bench@2.0 \
         --agent oracle \
-        --concurrency 4
+        --concurrency 4 \
+        --envs docker,nitrobox
+
+    # Cold vs warm start comparison:
+    #   1st run (cold): caches empty, --no-delete keeps them after
+    #   2nd run (warm): both sides use cached images/layers, default --delete cleans up after
+    python examples/bench_harbor_e2e.py \
+        --harbor-dir /path/to/harbor \
+        --dataset terminal-bench@2.0 \
+        --agent oracle --concurrency 4 \
+        --envs docker,nitrobox --no-delete
+    python examples/bench_harbor_e2e.py \
+        --harbor-dir /path/to/harbor \
+        --dataset terminal-bench@2.0 \
+        --agent oracle --concurrency 4 \
+        --envs docker,nitrobox
+
+    # Real LLM agent — measures sandbox overhead vs inference time
+    ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
+        --harbor-dir /path/to/harbor \
+        --dataset terminal-bench@2.0 \
+        --agent terminus-2 \
+        --model anthropic/claude-sonnet-4-6 \
+        --n-tasks 1 --concurrency 1 \
+        --envs docker,nitrobox
 
     # Specific tasks
     python examples/bench_harbor_e2e.py \
@@ -47,8 +71,9 @@ def run_harbor(
     job_name: str,
     include_tasks: list[str] | None = None,
     exclude_tasks: list[str] | None = None,
+    no_delete: bool = False,
 ) -> dict:
-    """Run harbor with default settings and return timing results."""
+    """Run harbor and return timing results."""
     cmd = [
         "uv", "run", "harbor", "run",
         "-d", dataset,
@@ -58,6 +83,8 @@ def run_harbor(
         "--job-name", job_name,
         "-y",
     ]
+    if no_delete:
+        cmd.append("--no-delete")
     if n_tasks is not None:
         cmd.extend(["-l", str(n_tasks)])
     if agent:
@@ -110,7 +137,8 @@ def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
             "agent_setup": [],
             "agent_execution": [],
             "verifier": [],
-            "teardown": [],    # computed: total - sum(phases)
+            "teardown": [],
+            "llm_inference": [],
         },
     }
 
@@ -146,11 +174,16 @@ def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
         verifier = _phase_seconds(data, "verifier") or 0
         teardown = _phase_seconds(data, "environment_teardown") or 0
 
+        # LLM inference time (reported by agent, None for oracle)
+        ar = data.get("agent_result") or {}
+        llm_time = ar.get("llm_time_s") or 0
+
         results["phases"]["environment_setup"].append(env_setup)
         results["phases"]["agent_setup"].append(agent_setup)
         results["phases"]["agent_execution"].append(agent_exec)
         results["phases"]["verifier"].append(verifier)
         results["phases"]["teardown"].append(teardown)
+        results["phases"]["llm_inference"].append(llm_time)
 
     return results
 
@@ -190,8 +223,10 @@ def _print_results(
             agt_x = _mean(r["phases"]["agent_execution"])
             vfy = _mean(r["phases"]["verifier"])
             tear = _mean(r["phases"]["teardown"])
+            llm = _mean(r["phases"]["llm_inference"])
             total = env_s + agt_s + agt_x + vfy + tear
-            overhead_pct = (total - agt_x) / total * 100 if total > 0 else 0
+            # Overhead = everything except LLM inference
+            overhead_pct = (total - llm) / total * 100 if total > 0 else 0
             pass_n = r["rewards"].get("1.0", 0)
             fail_n = r["rewards"].get("0.0", 0)
             err_n = r["errors"]
@@ -221,24 +256,23 @@ def _print_results(
             agt_x = _mean(r["phases"]["agent_execution"])
             vfy = _mean(r["phases"]["verifier"])
             tear = _mean(r["phases"]["teardown"])
+            llm = _mean(r["phases"]["llm_inference"])
             total = env_s + agt_s + agt_x + vfy + tear
 
             if total <= 0:
                 continue
 
-            # Sandbox overhead = everything except agent_execution
-            sandbox_time = env_s + agt_s + vfy + tear
-            overhead_pct = sandbox_time / total * 100
+            overhead_pct = (total - llm) / total * 100
 
-            print(f"  {env_type} c={c} (total {total:.1f}s, sandbox overhead {overhead_pct:.0f}%):")
+            print(f"  {env_type} c={c} (total {total:.1f}s, overhead {overhead_pct:.0f}%):")
             for name, val in [
                 ("env_setup", env_s), ("agent_setup", agt_s),
-                ("agent_exec", agt_x), ("verifier", vfy),
-                ("teardown", tear),
+                ("agent_exec", agt_x), ("  llm_inference", llm),
+                ("verifier", vfy), ("teardown", tear),
             ]:
                 pct = val / total * 100
                 bar = "#" * int(pct / 2)
-                print(f"    {name:>12}: {val:>6.1f}s ({pct:>5.1f}%) {bar}")
+                print(f"    {name:>15}: {val:>6.1f}s ({pct:>5.1f}%) {bar}")
 
     # Speedup
     print("\nSpeedup (wall-clock):")
@@ -284,6 +318,9 @@ def main():
     parser.add_argument("--output", default=None)
     parser.add_argument("-i", "--include-task", action="append", default=None)
     parser.add_argument("-x", "--exclude-task", action="append", default=None)
+    parser.add_argument("--no-delete", action="store_true",
+                        help="Keep images/caches after run (for warm-start benchmarks). "
+                        "Run twice: first = cold start, second = warm start.")
     args = parser.parse_args()
 
     concurrency_levels = [int(c) for c in args.concurrency.split(",")]
@@ -322,6 +359,7 @@ def main():
                 job_name=job_name,
                 include_tasks=args.include_task,
                 exclude_tasks=args.exclude_task,
+                no_delete=args.no_delete,
             )
             all_results[key] = r
             print(

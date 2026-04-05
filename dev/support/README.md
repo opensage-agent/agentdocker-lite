@@ -40,12 +40,36 @@ cd harbor && uv sync --all-extras --dev
 pip install nitrobox
 docker login   # required to avoid Docker Hub rate limits
 
-# Full comparison (all tasks, concurrency 4)
+# Cold start comparison (default --delete cleans up after)
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
     --agent oracle \
-    --concurrency 4
+    --concurrency 4 \
+    --envs docker,nitrobox
+
+# Cold + warm start comparison:
+#   1st run: cold start, --no-delete keeps caches
+#   2nd run: warm start, default --delete cleans up
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox --no-delete
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox
+
+# Real LLM agent (measures sandbox overhead vs inference time)
+ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent terminus-2 \
+    --model anthropic/claude-sonnet-4-6 \
+    --n-tasks 1 --concurrency 1 \
+    --envs docker,nitrobox
 
 # Specific tasks only
 python examples/bench_harbor_e2e.py \
