@@ -626,6 +626,12 @@ class Sandbox:
             else:
                 shutil.rmtree(self._env_dir, ignore_errors=True)
 
+        # Release shared locks on layer dirs — allows cache cleanup to proceed.
+        if hasattr(self, "_layer_lock_fds") and self._layer_lock_fds:
+            from nitrobox.image.layers import release_layer_locks
+            release_layer_locks(self._layer_lock_fds)
+            self._layer_lock_fds = []
+
         self._unregister(self)
 
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -1045,6 +1051,12 @@ class Sandbox:
         self._upper_dir: Path | None = None
         self._work_dir: Path | None = None
 
+        # Acquire shared locks on layer dirs
+        self._layer_lock_fds: list[int] = []
+        if self._layer_dirs:
+            from nitrobox.image.layers import acquire_layer_locks
+            self._layer_lock_fds = acquire_layer_locks(self._layer_dirs)
+
         # --- filesystem + cgroup ----------------------------------------
         if self._fs_backend == "btrfs":
             self._setup_btrfs()
@@ -1121,6 +1133,13 @@ class Sandbox:
                 )
             else:
                 self._lowerdir_spec = str(self._base_rootfs)
+
+        # Acquire shared locks on layer dirs — prevents concurrent deletion
+        # while this sandbox's overlayfs uses them as lowerdir.
+        self._layer_lock_fds: list[int] = []
+        if self._layer_dirs:
+            from nitrobox.image.layers import acquire_layer_locks
+            self._layer_lock_fds = acquire_layer_locks(self._layer_dirs)
 
         self._upper_dir = self._env_dir / "upper"
         self._work_dir = self._env_dir / "work"

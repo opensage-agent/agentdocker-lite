@@ -354,15 +354,14 @@ class ComposeProject:
 
             try:
                 from nitrobox.image.store import _get_image_diff_ids
-                from nitrobox.image.layers import rmtree_mapped
+                from nitrobox.image.layers import remove_layer_locked
                 diff_ids = _get_image_diff_ids(image)
                 for did in set(diff_ids):
                     layer_dir = layers_dir / _safe_cache_key(did)
                     if layer_dir.exists():
-                        # Layer dirs contain files with mapped UIDs from
-                        # user-namespace extraction — rmtree_mapped enters
-                        # a userns to delete them (same as Sandbox.delete).
-                        rmtree_mapped(layer_dir)
+                        # Acquires LOCK_EX — blocks until all sandboxes
+                        # using this layer have released their LOCK_SH.
+                        remove_layer_locked(layer_dir)
                 logger.debug("Removed cached layers for %s", image)
             except Exception as e:
                 logger.debug("Could not clean cache for %s: %s", image, e)

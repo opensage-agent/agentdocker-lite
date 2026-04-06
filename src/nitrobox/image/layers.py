@@ -299,6 +299,77 @@ def prepare_rootfs_layers_from_docker(
 
 
 # ======================================================================
+#  Layer locking — flock-based reference counting                          #
+# ======================================================================
+#
+# Layers are shared across sandboxes.  Two problems arise without locking:
+#   1. Concurrent docker save: multiple threads extract the same layer
+#   2. Delete while in use: rmtree removes a layer dir while another
+#      sandbox's overlayfs is using it as lowerdir
+#
+# Solution: flock on per-layer lock files.
+#   - Extraction: LOCK_EX (already in _extract_single_layer_locked)
+#   - Usage:      LOCK_SH held for sandbox lifetime (acquire_layer_locks)
+#   - Deletion:   LOCK_EX blocks until all LOCK_SH released (remove_layer_locked)
+
+
+def acquire_layer_locks(layer_dirs: list[Path]) -> list[int]:
+    """Acquire shared locks on layer directories.
+
+    Returns a list of lock file descriptors that must be kept open
+    (and passed to :func:`release_layer_locks`) for the sandbox lifetime.
+    While held, :func:`remove_layer_locked` will block.
+    """
+    fds: list[int] = []
+    for layer_dir in layer_dirs:
+        lock_path = layer_dir.parent / f".{layer_dir.name}.lock"
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            # If non-blocking fails (shouldn't for SH), fall back to blocking
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        fds.append(fd)
+    return fds
+
+
+def release_layer_locks(lock_fds: list[int]) -> None:
+    """Release shared locks acquired by :func:`acquire_layer_locks`."""
+    for fd in lock_fds:
+        try:
+            os.close(fd)  # closing the fd releases the flock
+        except OSError:
+            pass
+
+
+def remove_layer_locked(layer_dir: Path) -> None:
+    """Remove a layer directory if no sandbox is using it.
+
+    Tries LOCK_EX non-blocking.  If another sandbox holds LOCK_SH
+    (layer in use as overlayfs lowerdir), skips removal — the layer
+    will be cleaned up when the last sandbox releases it, or on a
+    subsequent ``down --rmi`` call.
+    """
+    lock_path = layer_dir.parent / f".{layer_dir.name}.lock"
+    if not layer_dir.exists():
+        return
+    try:
+        with open(lock_path, "w") as lock_fd:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                logger.debug("Layer %s in use, skipping removal", layer_dir.name)
+                return
+            try:
+                rmtree_mapped(layer_dir)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_path.unlink(missing_ok=True)
+    except OSError as e:
+        logger.debug("remove_layer_locked %s: %s", layer_dir, e)
+
+
+# ======================================================================
 #  Internal — layer extraction & cache management                          #
 # ====================================================================== #
 
