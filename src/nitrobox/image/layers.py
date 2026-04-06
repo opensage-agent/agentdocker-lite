@@ -155,6 +155,11 @@ def _containers_storage_pull(image_name: str) -> bool:
     if pid == 0:
         os.close(userns_r); os.close(go_w); os.close(json_w)
         os.environ["_CONTAINERS_ROOTLESS_UID"] = str(outer_uid)
+        # Let buildah/containers-image read Docker's credentials
+        if "DOCKER_CONFIG" not in os.environ:
+            docker_cfg = Path.home() / ".docker"
+            if (docker_cfg / "config.json").exists():
+                os.environ["DOCKER_CONFIG"] = str(docker_cfg)
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         if libc.unshare(0x10000000) != 0:
             os._exit(1)

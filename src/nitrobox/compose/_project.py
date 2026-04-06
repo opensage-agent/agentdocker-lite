@@ -481,9 +481,17 @@ class ComposeProject:
             "run_root": str(run_root),
         }).encode()
 
+        # Ensure buildah can read Docker's credentials for registry pulls.
+        # containers/image searches $DOCKER_CONFIG/config.json automatically.
+        env = os.environ.copy()
+        if "DOCKER_CONFIG" not in env:
+            docker_cfg = Path.home() / ".docker"
+            if (docker_cfg / "config.json").exists():
+                env["DOCKER_CONFIG"] = str(docker_cfg)
+
         result = _sp.run(
             [bin_path, "image-build"],
-            input=req, capture_output=True,
+            input=req, capture_output=True, env=env,
         )
         if result.returncode != 0:
             raise RuntimeError(
