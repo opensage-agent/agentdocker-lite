@@ -218,16 +218,16 @@ def py_image_store_get(image_name: str) -> str | None:
 
 
 def py_image_store_put(image_name: str, config_json: str) -> None:
+    # Validate JSON first (Rust raises ValueError on invalid JSON)
+    try:
+        config = json.loads(config_json)
+    except json.JSONDecodeError as e:
+        raise ValueError(str(e)) from e
     with _IMAGE_STORE_LOCK:
         _IMAGE_STORE[image_name] = config_json
-        # Also index by image_id
-        try:
-            config = json.loads(config_json)
-            image_id = config.get("image_id", "")
-            if image_id and image_id != image_name:
-                _IMAGE_STORE[image_id] = config_json
-        except json.JSONDecodeError:
-            pass
+        image_id = config.get("image_id", "")
+        if image_id and image_id != image_name:
+            _IMAGE_STORE[image_id] = config_json
 
 
 def py_image_store_clear() -> None:
@@ -404,17 +404,13 @@ def py_spawn_sandbox(config: dict) -> PySpawnResult:
     sandbox child which inherits those fds, then Go exits. The sandbox
     shell (grandchild of Go) stays alive with pipes connected to Python.
     """
-    # Create pipes in Python's process
+    # Create pipes in Python's process.
+    # O_CLOEXEC is set so they don't leak to other children.
+    # pass_fds in Popen automatically clears CLOEXEC for the Go subprocess.
     stdin_r, stdin_w = os.pipe2(os.O_CLOEXEC)
     stdout_r, stdout_w = os.pipe2(os.O_CLOEXEC)
     signal_r, signal_w = os.pipe2(os.O_CLOEXEC)
     err_r, err_w = os.pipe2(os.O_CLOEXEC)
-
-    # Clear CLOEXEC on the fds we pass to Go so they survive exec
-    for fd in (stdin_r, stdin_w, stdout_r, stdout_w, signal_r, signal_w, err_r, err_w):
-        import fcntl
-        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
-        fcntl.fcntl(fd, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
 
     # Add pre-created fd numbers to config
     spawn_config = dict(config)
