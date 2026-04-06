@@ -183,6 +183,180 @@ class _StorageNS:
 # ====================================================================== #
 
 
+def _containers_storage_root() -> Path | None:
+    """Return the containers/storage graph root, or None if not configured."""
+    # Check env var first, then default rootless path
+    p = os.environ.get("CONTAINERS_STORAGE_ROOT", "")
+    if p:
+        return Path(p)
+    home = Path.home()
+    default = home / ".local/share/containers/storage"
+    if default.exists():
+        return default
+    return None
+
+
+def _try_containers_storage(image_name: str) -> list[Path] | None:
+    """Get layer paths from containers/storage (zero-copy, pure Python).
+
+    Reads the store's JSON metadata files directly — no Go binary needed
+    for the read path. Returns None if the image isn't in the store.
+    """
+    graph_root = _containers_storage_root()
+    if graph_root is None:
+        return None
+
+    try:
+        # containers/storage stores images/layers JSON in:
+        #   {graphRoot}/{driver}-images/images.json
+        #   {graphRoot}/{driver}-layers/layers.json
+        # Detect the driver from what directories exist
+        driver = None
+        for d in ("overlay", "vfs"):
+            if (graph_root / f"{d}-images").is_dir():
+                driver = d
+                break
+        if driver is None:
+            return None
+
+        images_file = graph_root / f"{driver}-images" / "images.json"
+        layers_file = graph_root / f"{driver}-layers" / "layers.json"
+        if not images_file.exists() or not layers_file.exists():
+            return None
+
+        images = json.loads(images_file.read_text())
+        layers_data = json.loads(layers_file.read_text())
+
+        # Build layer parent map
+        layer_parent: dict[str, str] = {}
+        for layer in layers_data:
+            lid = layer["id"]
+            layer_parent[lid] = layer.get("parent", "")
+
+        # Find the image by name
+        top_layer = None
+        for img in images:
+            for name in img.get("names", []):
+                if name == image_name or name.endswith("/" + image_name):
+                    top_layer = img.get("layer", "")
+                    break
+            if top_layer:
+                break
+
+        if not top_layer:
+            return None
+
+        # Walk layer chain top→bottom
+        chain: list[str] = []
+        lid = top_layer
+        while lid:
+            chain.append(lid)
+            lid = layer_parent.get(lid, "")
+
+        # Build paths (bottom-to-top for overlayfs lowerdir)
+        chain.reverse()
+        paths: list[Path] = []
+        for lid in chain:
+            if driver == "vfs":
+                p = graph_root / "vfs" / "dir" / lid
+            else:
+                p = graph_root / driver / lid / "diff"
+            if not p.is_dir():
+                return None  # Layer directory missing
+            paths.append(p)
+
+        logger.info("containers/storage: %s has %d layers (zero-copy)", image_name, len(paths))
+        return paths
+
+    except Exception as e:
+        logger.debug("containers/storage read failed: %s", e)
+        return None
+
+
+def _containers_storage_pull(image_name: str) -> bool:
+    """Pull an image into containers/storage via nitrobox-core image-pull.
+
+    Requires userns with full UID mapping. Returns True on success.
+    """
+    bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
+    if not bin_path:
+        candidate = Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"
+        if candidate.is_file():
+            bin_path = str(candidate)
+    if not bin_path:
+        return False
+
+    from nitrobox.config import detect_subuid_range
+    subuid = detect_subuid_range()
+    if not subuid:
+        return False
+
+    outer_uid, sub_start, sub_count = subuid
+    outer_gid = os.getgid()
+
+    graph_root = _containers_storage_root()
+    if graph_root is None:
+        graph_root = Path.home() / ".local/share/containers/storage"
+        graph_root.mkdir(parents=True, exist_ok=True)
+        os.environ["CONTAINERS_STORAGE_ROOT"] = str(graph_root)
+
+    run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
+    run_root.mkdir(parents=True, exist_ok=True)
+
+    req = json.dumps({
+        "image": image_name,
+        "graph_root": str(graph_root),
+        "run_root": str(run_root),
+    }).encode()
+
+    # Fork + unshare(CLONE_NEWUSER) + newuidmap + exec image-pull
+    userns_r, userns_w = os.pipe()
+    go_r, go_w = os.pipe()
+    json_r, json_w = os.pipe()
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(userns_r)
+        os.close(go_w)
+        os.close(json_w)
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.unshare(0x10000000) != 0:
+            os._exit(1)
+        os.write(userns_w, b"R")
+        os.close(userns_w)
+        os.read(go_r, 1)
+        os.close(go_r)
+        os.dup2(json_r, 0)
+        os.close(json_r)
+        os.execvp(bin_path, [bin_path, "image-pull"])
+        os._exit(127)
+
+    os.close(userns_w)
+    os.close(go_r)
+    os.close(json_r)
+    os.read(userns_r, 1)
+    os.close(userns_r)
+
+    pid_s = str(pid)
+    subprocess.run(
+        ["newuidmap", pid_s, "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
+        check=False, capture_output=True,
+    )
+    subprocess.run(
+        ["newgidmap", pid_s, "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
+        check=False, capture_output=True,
+    )
+
+    os.write(go_w, b"G")
+    os.close(go_w)
+    os.write(json_w, req)
+    os.close(json_w)
+
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status) == 0
+
+
 def prepare_rootfs_layers_from_docker(
     image_name: str,
     cache_dir: Path,
@@ -190,8 +364,11 @@ def prepare_rootfs_layers_from_docker(
 ) -> list[Path]:
     """Extract Docker image as individual cached layers for overlayfs stacking.
 
-    Uses ``docker save`` to get image layers, caches each by its content
-    hash (diff_id).  Images sharing base layers skip re-extraction.
+    Priority:
+      0. containers/storage — zero-copy diff paths (no extraction needed)
+      1. Snapshot fast-path — containerd snapshots via docker exec tar
+      2. Docker save — stream compressed layers
+      3. Registry download — pull from remote registry
 
     Args:
         image_name: Docker image (e.g. ``"ubuntu:22.04"``).
@@ -205,6 +382,20 @@ def prepare_rootfs_layers_from_docker(
     Raises:
         RuntimeError: If layer extraction fails.
     """
+    # Priority 0: containers/storage zero-copy path
+    storage_layers = _try_containers_storage(image_name)
+    if storage_layers is not None:
+        return storage_layers
+
+    # Not in store — pull into containers/storage
+    if _containers_storage_pull(image_name):
+        storage_layers = _try_containers_storage(image_name)
+        if storage_layers is not None:
+            return storage_layers
+        logger.debug("Pull succeeded but layers not found in store")
+
+    # Fallback: Docker-based extraction (existing code)
+    logger.debug("containers/storage unavailable for %s, falling back to Docker", image_name)
     layers_dir = cache_dir / "layers"
     layers_dir.mkdir(parents=True, exist_ok=True)
 
