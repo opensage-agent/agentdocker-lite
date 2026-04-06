@@ -481,13 +481,19 @@ class ComposeProject:
             "run_root": str(run_root),
         }).encode()
 
-        # Ensure buildah can read Docker's credentials for registry pulls.
-        # containers/image searches $DOCKER_CONFIG/config.json automatically.
+        # Ensure buildah has Docker credentials + pasta in PATH.
         env = os.environ.copy()
         if "DOCKER_CONFIG" not in env:
             docker_cfg = Path.home() / ".docker"
             if (docker_cfg / "config.json").exists():
                 env["DOCKER_CONFIG"] = str(docker_cfg)
+        if "XDG_RUNTIME_DIR" not in env:
+            env["XDG_RUNTIME_DIR"] = f"/tmp/nitrobox-run-{os.getuid()}"
+            os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
+        # Ensure vendored pasta is in PATH (needed by buildah for networking)
+        vendor_dir = str(Path(__file__).resolve().parent.parent / "_vendor")
+        if vendor_dir not in env.get("PATH", ""):
+            env["PATH"] = vendor_dir + ":" + env.get("PATH", "")
 
         result = _sp.run(
             [bin_path, "image-build"],
