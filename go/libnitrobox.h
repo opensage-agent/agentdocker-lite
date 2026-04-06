@@ -87,6 +87,7 @@ typedef struct { void *data; GoInt len; GoInt cap; } GoSlice;
 extern "C" {
 #endif
 
+extern void NbxSetCoreBin(char* path);
 extern void NbxFree(char* p);
 extern int NbxCheckNewMountAPI(void);
 extern char* NbxMountOverlay(char* lowerdirSpec, char* upperDir, char* workDir, char* target);

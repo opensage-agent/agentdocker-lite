@@ -24,6 +24,7 @@ import cffi
 # ======================================================================
 
 _CDEF = """
+void NbxSetCoreBin(char* path);
 void NbxFree(char* p);
 
 // Mount
@@ -97,11 +98,13 @@ def _get_lib():
                 for p in _SO_SEARCH:
                     if p and os.path.isfile(p):
                         _lib = _ffi.dlopen(p)
-                        # Set NITROBOX_CORE_BIN so Go's re-exec finds the binary
-                        # (in c-shared mode os.Executable() returns Python)
+                        # Tell Go where to find nitrobox-core for re-exec.
+                        # Must use NbxSetCoreBin (not os.environ) because Go's
+                        # os.Getenv doesn't see runtime Python env var changes.
                         _go_dir = str(Path(p).parent)
                         _bin_path = os.path.join(_go_dir, "nitrobox-core")
                         if os.path.isfile(_bin_path):
+                            _lib.NbxSetCoreBin(_ffi.new("char[]", _bin_path.encode()))
                             os.environ["NITROBOX_CORE_BIN"] = _bin_path
                         break
                 if _lib is None:
@@ -480,8 +483,23 @@ class PySpawnResult:
         self.err_r_fd = err_r_fd
 
 
+_subreaper_set = False
+
+
 def py_spawn_sandbox(config: dict) -> PySpawnResult:
-    """Spawn via subprocess (Go binary). Fork is not safe in c-shared mode."""
+    """Spawn via subprocess (Go binary). Fork is not safe in c-shared mode.
+
+    Sets PR_SET_CHILD_SUBREAPER so that the sandbox shell (grandchild of
+    the Go subprocess) gets reparented to this Python process when the Go
+    subprocess exits. Without this, waitpid() on the shell PID fails.
+    """
+    global _subreaper_set
+    if not _subreaper_set:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER = 36
+        _subreaper_set = True
+
     stdin_r, stdin_w = os.pipe2(os.O_CLOEXEC)
     stdout_r, stdout_w = os.pipe2(os.O_CLOEXEC)
     signal_r, signal_w = os.pipe2(os.O_CLOEXEC)
