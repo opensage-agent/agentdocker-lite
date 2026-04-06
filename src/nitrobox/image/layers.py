@@ -298,10 +298,12 @@ def rmtree_mapped(path: str | Path) -> None:
 
 
 def _rmtree_in_userns(path: Path) -> None:
-    """Fork into userns with full UID mapping and rm -rf."""
-    import ctypes
-    from nitrobox.config import detect_subuid_range
+    """Create a new userns with full UID mapping and rm -rf.
 
+    Uses subprocess (not os.fork) to avoid fd corruption in the
+    multi-threaded Go c-shared process.
+    """
+    from nitrobox.config import detect_subuid_range
     subuid = detect_subuid_range()
     if not subuid:
         shutil.rmtree(path, ignore_errors=True)
@@ -310,37 +312,29 @@ def _rmtree_in_userns(path: Path) -> None:
     outer_uid, sub_start, sub_count = subuid
     outer_gid = os.getgid()
 
-    userns_r, userns_w = os.pipe()
-    go_r, go_w = os.pipe()
+    # Child reads 1 byte from stdin (blocks until parent writes after
+    # setting up UID mapping), then runs rm -rf.
+    proc = subprocess.Popen(
+        ["unshare", "--user", "--", "sh", "-c",
+         f"read dummy && rm -rf {str(path)}"],
+        stdin=subprocess.PIPE,
+    )
 
-    pid = os.fork()
-    if pid == 0:
-        os.close(userns_r)
-        os.close(go_w)
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        libc.unshare(0x10000000)  # CLONE_NEWUSER
-        os.write(userns_w, b"R")
-        os.close(userns_w)
-        os.read(go_r, 1)
-        os.close(go_r)
-        shutil.rmtree(path, ignore_errors=True)
-        os._exit(0)
-
-    os.close(userns_w)
-    os.close(go_r)
-    os.read(userns_r, 1)
-    os.close(userns_r)
+    # Set up UID/GID mapping
+    pid_s = str(proc.pid)
     subprocess.run(
-        ["newuidmap", str(pid), "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
+        ["newuidmap", pid_s, "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
         check=False, capture_output=True,
     )
     subprocess.run(
-        ["newgidmap", str(pid), "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
+        ["newgidmap", pid_s, "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
         check=False, capture_output=True,
     )
-    os.write(go_w, b"G")
-    os.close(go_w)
-    os.waitpid(pid, 0)
+
+    # Signal child to proceed
+    proc.stdin.write(b"go\n")
+    proc.stdin.close()
+    proc.wait(timeout=30)
 
 
 # ====================================================================== #
