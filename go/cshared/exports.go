@@ -13,6 +13,7 @@ package main
 import "C"
 import (
 	"encoding/json"
+	"os"
 	"unsafe"
 
 	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
@@ -26,6 +27,19 @@ import (
 	"github.com/opensage-agent/nitrobox/go/internal/userns"
 	"github.com/opensage-agent/nitrobox/go/internal/whiteout"
 )
+
+// coreBinPath stores the path to the nitrobox-core binary for re-exec.
+// Set from Python via NbxSetCoreBin() since Go's os.Getenv() in c-shared
+// mode doesn't see env vars set by Python at runtime.
+var coreBinPath string
+
+//export NbxSetCoreBin
+func NbxSetCoreBin(path *C.char) {
+	p := C.GoString(path)
+	coreBinPath = p
+	// Also set it in the actual environment for child processes
+	os.Setenv("NITROBOX_CORE_BIN", p)
+}
 
 // errStr returns a C string for an error (caller must free), or nil on success.
 func errStr(err error) *C.char {
