@@ -126,12 +126,19 @@ func ImageLayers(store storage.Store, imageRef string) ([]string, error) {
 	return paths, nil
 }
 
+// PullResult describes the outcome of a pull operation.
+type PullResult struct {
+	Transport string `json:"transport"` // "docker-daemon", "docker", or "explicit"
+}
+
 // PullImage pulls an image into containers/storage.
 //
 // Search order (mirrors Docker Compose behavior):
 //  1. docker-daemon: — copy from local Docker daemon (fast, no network)
 //  2. docker:// — pull from registry (fallback)
-func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.SystemContext) error {
+//
+// Returns PullResult indicating which transport was used.
+func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.SystemContext) (*PullResult, error) {
 	ctx := context.Background()
 
 	// Destination in containers/storage
@@ -141,7 +148,7 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	}
 	destRef, err := imgstorage.Transport.ParseStoreReference(store, storageName)
 	if err != nil {
-		return fmt.Errorf("parse dest: %w", err)
+		return nil, fmt.Errorf("parse dest: %w", err)
 	}
 
 	policy, err := signature.NewPolicyContext(&signature.Policy{
@@ -150,7 +157,7 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("policy: %w", err)
+		return nil, fmt.Errorf("policy: %w", err)
 	}
 	defer policy.Destroy()
 
@@ -158,13 +165,13 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	if strings.Contains(imageRef, "://") || strings.HasPrefix(imageRef, "docker-daemon:") {
 		srcRef, err := alltransports.ParseImageName(imageRef)
 		if err != nil {
-			return fmt.Errorf("parse source %q: %w", imageRef, err)
+			return nil, fmt.Errorf("parse source %q: %w", imageRef, err)
 		}
 		_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{SourceCtx: systemCtx})
 		if err != nil {
-			return fmt.Errorf("pull %q: %w", imageRef, err)
+			return nil, fmt.Errorf("pull %q: %w", imageRef, err)
 		}
-		return nil
+		return &PullResult{Transport: "explicit"}, nil
 	}
 
 	// Try docker-daemon: first (local Docker, no network needed).
@@ -172,7 +179,7 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	if daemonErr == nil {
 		_, err = cp.Image(ctx, policy, destRef, daemonRef, &cp.Options{SourceCtx: systemCtx})
 		if err == nil {
-			return nil
+			return &PullResult{Transport: "docker-daemon"}, nil
 		}
 		// Docker daemon not available or image not found — fall through to registry.
 	}
@@ -180,13 +187,13 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	// Fallback: pull from registry.
 	srcRef, err := alltransports.ParseImageName("docker://" + imageRef)
 	if err != nil {
-		return fmt.Errorf("parse source %q: %w", imageRef, err)
+		return nil, fmt.Errorf("parse source %q: %w", imageRef, err)
 	}
 	_, err = cp.Image(ctx, policy, destRef, srcRef, &cp.Options{SourceCtx: systemCtx})
 	if err != nil {
-		return fmt.Errorf("pull %q: %w", imageRef, err)
+		return nil, fmt.Errorf("pull %q: %w", imageRef, err)
 	}
-	return nil
+	return &PullResult{Transport: "docker"}, nil
 }
 
 // BuildImage builds a Dockerfile using buildah.

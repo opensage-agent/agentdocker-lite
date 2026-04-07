@@ -119,11 +119,15 @@ def _get_store_layers(image_name: str) -> list[Path] | None:
 # ====================================================================== #
 
 
-def _containers_storage_pull(image_name: str) -> bool:
+def _containers_storage_pull(image_name: str) -> bool | str:
     """Pull an image into containers/storage via nitrobox-core image-pull.
 
     Uses subprocess (not os.fork) so it is safe to call from asyncio
     executor threads.
+
+    Returns:
+        ``False`` on failure, or a transport string
+        (``"docker-daemon"``, ``"docker"``, ``"explicit"``) on success.
     """
     from nitrobox._gobin import gobin
     bin_path = gobin()
@@ -171,7 +175,13 @@ def _containers_storage_pull(image_name: str) -> bool:
     )
     if r.returncode != 0:
         logger.warning("image-pull failed: %s", r.stderr.decode().strip()[:500])
-    return r.returncode == 0
+        return False
+    # Parse pull result JSON (contains transport used)
+    try:
+        result = json.loads(r.stdout.decode().strip())
+        return result.get("transport", True)
+    except (json.JSONDecodeError, ValueError):
+        return True
 
 
 # ====================================================================== #
