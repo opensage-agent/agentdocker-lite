@@ -26,8 +26,14 @@ def _requires_root():
 
 
 def _requires_docker():
-    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-        pytest.skip("requires Docker")
+    """Skip if images cannot be pulled (needs Go binary or Docker daemon)."""
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
+    if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+        return
+    if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+        return
+    pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
 
 # ------------------------------------------------------------------ #
