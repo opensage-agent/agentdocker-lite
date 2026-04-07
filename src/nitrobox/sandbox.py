@@ -649,14 +649,6 @@ class Sandbox:
             release_layer_locks(self._layer_lock_fds)
             self._layer_lock_fds = []
 
-        # Clean up empty base dir
-        env_base = self._env_dir.parent
-        if env_base.exists() and not any(env_base.iterdir()):
-            try:
-                env_base.rmdir()
-            except OSError:
-                pass
-
         self._unregister(self)
 
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -923,20 +915,6 @@ class Sandbox:
 
             _force_rmtree(entry)
             cleaned += 1
-
-        # Clean up empty base dir
-        if base.exists() and not any(base.iterdir()):
-            try:
-                base.rmdir()
-            except OSError:
-                pass
-
-        # Clean up containers/storage run root (stale locks/state)
-        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
-        if run_root.exists():
-            # Only clean if no sandboxes are running
-            if not base.exists() or not any(base.iterdir()):
-                shutil.rmtree(run_root, ignore_errors=True)
 
         if cleaned:
             logger.info("Cleaned up %d stale sandbox(es) under %s", cleaned, env_base_dir)
