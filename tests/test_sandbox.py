@@ -2192,8 +2192,11 @@ class TestRegistry:
             _get_store_layers,
         )
 
-        # alpine should already be in the store from earlier tests
-        layers = _get_store_layers("docker.io/library/alpine:latest")
+        # Pull if not already in store
+        if _get_store_layers("alpine:latest") is None:
+            assert _containers_storage_pull("alpine:latest"), "pull failed"
+
+        layers = _get_store_layers("alpine:latest")
         assert layers is not None
         assert len(layers) >= 1
         assert (layers[0] / "bin").exists()
