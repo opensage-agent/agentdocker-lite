@@ -816,6 +816,13 @@ class Sandbox:
                                     "needs sudo umount -l or reboot)", rootfs_dir,
                                 )
                                 continue
+                    # Fix overlay workdir permissions (kernel sets 000)
+                    # and any other permission issues before rmtree.
+                    for child in entry.rglob("*"):
+                        try:
+                            child.chmod(0o700)
+                        except OSError:
+                            pass
                     from nitrobox.image.layers import rmtree_mapped
                     rmtree_mapped(entry)
                     cleaned += 1
@@ -890,6 +897,11 @@ class Sandbox:
                 except OSError as e:
                     logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
 
+            for child in entry.rglob("*"):
+                try:
+                    child.chmod(0o700)
+                except OSError:
+                    pass
             from nitrobox.image.layers import rmtree_mapped
             rmtree_mapped(entry)
             cleaned += 1
