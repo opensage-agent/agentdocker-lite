@@ -55,7 +55,11 @@ func main() {
 				return err
 			}
 			defer store.Free()
-			return nbximage.PullImage(store, req.Image, nil)
+			result, err := nbximage.PullImage(store, req.Image, nil)
+			if err != nil {
+				return err
+			}
+			return writeJSON(result)
 		},
 	})
 

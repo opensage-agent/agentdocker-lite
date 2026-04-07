@@ -2267,7 +2267,7 @@ class TestImagePullPipeline:
     # -- Layer 2: Docker daemon local --------------------------------- #
 
     def test_pull_from_docker_daemon(self):
-        """Image in Docker but not in containers/storage is copied via docker-daemon transport."""
+        """Image in Docker but not in containers/storage uses docker-daemon transport."""
         self._skip_if_no_gobin()
         self._skip_if_no_docker()
         from nitrobox.image.layers import (
@@ -2275,7 +2275,6 @@ class TestImagePullPipeline:
             _get_store_layers,
         )
 
-        # Use a small image that's likely already in Docker
         image = "alpine:latest"
 
         # Ensure it's in Docker
@@ -2284,12 +2283,16 @@ class TestImagePullPipeline:
             capture_output=True, timeout=120,
         )
 
-        # Remove from containers/storage if present (to force docker-daemon path)
+        # Remove from containers/storage (force docker-daemon path)
         if _get_store_layers(image) is not None:
             self._delete_image(image)
+        assert _get_store_layers(image) is None, "image should not be in store"
 
-        # Now pull — should try docker-daemon first
-        assert _containers_storage_pull(image), "pull failed"
+        # Pull — should use docker-daemon transport
+        transport = _containers_storage_pull(image)
+        assert transport, "pull failed"
+        assert transport == "docker-daemon", \
+            f"expected docker-daemon transport, got {transport!r}"
 
         layers = _get_store_layers(image)
         assert layers is not None
@@ -2298,27 +2301,35 @@ class TestImagePullPipeline:
     # -- Layer 3: Registry remote ------------------------------------- #
 
     def test_pull_from_registry(self):
-        """Image not in Docker or store is pulled from remote registry."""
+        """Image not in Docker or store uses docker (registry) transport."""
         self._skip_if_no_gobin()
+        self._skip_if_no_docker()
         _skip_if_no_registry()
         from nitrobox.image.layers import (
             _containers_storage_pull,
             _get_store_layers,
         )
 
-        # Use a specific tag unlikely to be locally cached
         image = "alpine:3.19"
 
-        # Remove from store if present
+        # Remove from containers/storage
         if _get_store_layers(image) is not None:
             self._delete_image(image)
 
-        assert _containers_storage_pull(image), "registry pull failed"
+        # Remove from Docker too — force registry path
+        subprocess.run(
+            ["docker", "rmi", "-f", image],
+            capture_output=True, timeout=30,
+        )
+
+        transport = _containers_storage_pull(image)
+        assert transport, "registry pull failed"
+        assert transport == "docker", \
+            f"expected docker (registry) transport, got {transport!r}"
 
         layers = _get_store_layers(image)
         assert layers is not None
         assert len(layers) >= 1
-        # Verify real filesystem content
         has_content = any(
             (d / "bin").exists() or (d / "usr").exists()
             for d in layers
@@ -2337,11 +2348,17 @@ class TestImagePullPipeline:
 
     @staticmethod
     def _delete_image(image: str) -> subprocess.CompletedProcess:
-        """Call image-delete with correct run_root."""
+        """Call image-delete with same graph_root/run_root as pull."""
         import json
         from nitrobox._gobin import gobin
+        from nitrobox.image.layers import _containers_storage_root
+        graph_root = _containers_storage_root()
+        if graph_root is None:
+            from pathlib import Path
+            graph_root = Path.home() / ".local/share/containers/storage"
         req = json.dumps({
             "image": image,
+            "graph_root": str(graph_root),
             "run_root": f"/tmp/nitrobox-containers-run-{os.getuid()}",
         })
         env = dict(os.environ)
