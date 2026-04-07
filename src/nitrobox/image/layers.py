@@ -305,22 +305,24 @@ def _rmtree_in_userns(path: Path) -> None:
 
     outer_uid, sub_start, sub_count = subuid
 
-    # Use nitrobox-core with CGO constructor to enter a fresh userns.
-    # Set _NITROBOX_NSENTER with a fake PID — the constructor will try
-    # setns and fail, but we just need the process to be in a userns.
-    # Instead, use the _fixup-worker which does unshare internally.
-    # Actually simplest: just chmod everything, then rmtree.
-    subprocess.run(
-        [bin_path, "_fixup-worker"],
-        env={
-            **os.environ,
-            "_NBX_USERNS_PID": str(outer_uid),  # dummy — fixup worker uses CGO setns
-            "_NBX_DIR_PATH": str(path),
-        },
+    # Use rmtree-in-userns subcommand which does unshare(CLONE_NEWUSER)
+    # + newuidmap to get the right UID mapping, then os.RemoveAll.
+    import json
+    req = json.dumps({
+        "path": str(path),
+        "outer_uid": outer_uid,
+        "outer_gid": os.getgid(),
+        "sub_start": sub_start,
+        "sub_count": sub_count,
+    })
+    r = subprocess.run(
+        [bin_path, "rmtree-in-userns"],
+        input=req.encode(),
         capture_output=True, timeout=30,
     )
-    # After fixup (chmod a+rwX), rmtree should work
-    shutil.rmtree(path, ignore_errors=True)
+    if r.returncode != 0:
+        # Fallback: try shutil with ignore_errors
+        shutil.rmtree(path, ignore_errors=True)
 
 
 # ====================================================================== #
