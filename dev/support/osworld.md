@@ -49,6 +49,19 @@ VM being usable.
 | 8 | 448ms | 396ms | 1.1x |
 | 16 | 466ms | 404ms | 1.2x |
 
+## Verification Run (10 tasks, 15 steps)
+
+Independent verification on this machine (2026-04-09):
+
+| Env | Tasks | Pass | Wall time |
+|-----|-------|------|-----------|
+| Docker | 10 | 0 | 1900s (32m) |
+| nitrobox | 10 | 0 | 1703s (28m) |
+
+**Wall-clock speedup: 1.12x.** Both environments produce identical
+results (0 pass expected — 15 steps is insufficient for OSWorld tasks).
+Correctness parity confirmed.
+
 ## Reproduce
 
 ```bash
