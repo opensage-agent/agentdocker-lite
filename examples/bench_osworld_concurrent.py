@@ -24,12 +24,12 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-LOG_FILE = "/scratch/ruilin/workspace/bench_concurrent.log"
 _log_fh = None
 
-def setup_logging():
+def setup_logging(log_file=None):
     global _log_fh
-    _log_fh = open(LOG_FILE, "w")
+    if log_file:
+        _log_fh = open(log_file, "w")
 
 def log(msg):
     line = f"{time.strftime('%H:%M:%S')} {msg}"
@@ -280,26 +280,21 @@ def bench_concurrent(runner, qcow2, concurrency, memory, cpus, label):
 # ---------------------------------------------------------------------------
 
 def main():
-    setup_logging()
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--qcow2", default=None)
     parser.add_argument("--concurrency", default="1,4,8,16",
                         help="Comma-separated concurrency levels")
     parser.add_argument("--memory", default="4G")
     parser.add_argument("--cpus", type=int, default=4)
+    parser.add_argument("--output", default=None,
+                        help="Log file path (default: stdout only)")
     args = parser.parse_args()
 
+    setup_logging(args.output)
+
     qcow2 = args.qcow2
-    if not qcow2:
-        for c in ["docker_vm_data/Ubuntu.qcow2",
-                   "../osworld/docker_vm_data/Ubuntu.qcow2",
-                   "/scratch/ruilin/workspace/osworld/docker_vm_data/Ubuntu.qcow2"]:
-            if os.path.exists(c):
-                qcow2 = c
-                break
     if not qcow2 or not os.path.exists(qcow2):
-        log("ERROR: Ubuntu.qcow2 not found. Use --qcow2")
+        log("ERROR: Ubuntu.qcow2 not found. Use --qcow2 /path/to/Ubuntu.qcow2")
         return
 
     levels = [int(x) for x in args.concurrency.split(",")]
