@@ -25,9 +25,12 @@ def _requires_root():
         pytest.skip("requires root")
 
 
-def _requires_docker():
-    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-        pytest.skip("requires Docker")
+def _requires_gobin():
+    """Skip if nitrobox-core Go binary is not available."""
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        pytest.skip("requires nitrobox-core Go binary")
 
 
 # ------------------------------------------------------------------ #
@@ -39,7 +42,7 @@ def _requires_docker():
 def root_sandbox(tmp_path, shared_cache_dir):
     """Standard root sandbox with seccomp enabled (default)."""
     _requires_root()
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -57,7 +60,7 @@ def userns_sandbox(tmp_path, shared_cache_dir):
     """User namespace sandbox — skipped if running as root."""
     if os.geteuid() == 0:
         pytest.skip("userns test must run as non-root")
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -145,7 +148,7 @@ class TestEntrypoint:
     def test_entrypoint_runs_on_start(self, tmp_path, shared_cache_dir):
         """ENTRYPOINT script runs during sandbox init and creates a marker."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -164,7 +167,7 @@ class TestEntrypoint:
     def test_entrypoint_env_setup(self, tmp_path, shared_cache_dir):
         """ENTRYPOINT can set up environment visible to later commands."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -184,7 +187,7 @@ class TestEntrypoint:
     def test_entrypoint_survives_reset(self, tmp_path, shared_cache_dir):
         """ENTRYPOINT re-runs after sandbox reset."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -215,7 +218,7 @@ class TestEntrypoint:
     def test_bad_entrypoint_fails_gracefully(self, tmp_path, shared_cache_dir):
         """Non-existent entrypoint should fail at sandbox creation."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -229,7 +232,7 @@ class TestEntrypoint:
         """ENTRYPOINT works in rootless (user namespace) mode."""
         if os.geteuid() == 0:
             pytest.skip("rootless test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -247,7 +250,7 @@ class TestEntrypoint:
     def test_image_entrypoint_backfill(self, tmp_path, shared_cache_dir):
         """SandboxConfig.entrypoint is auto-filled from OCI image config."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         from unittest.mock import patch
 
         fake_cfg = {
@@ -290,7 +293,7 @@ class TestCleanup:
     def test_cleanup_stale_removes_leftover(self, tmp_path, shared_cache_dir):
         """cleanup_stale() removes leftover sandbox directories."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -411,7 +414,7 @@ class TestUserNamespace:
 
     def test_whiteout_strategy(self, userns_sandbox):
         """Whiteout strategy should be detected based on kernel version."""
-        from nitrobox.rootfs import _detect_whiteout_strategy
+        from nitrobox.storage.whiteout import _detect_whiteout_strategy
         strategy = _detect_whiteout_strategy()
         assert strategy in ("xattr", "userns")
         assert userns_sandbox.features.get("whiteout") == strategy
@@ -420,7 +423,7 @@ class TestUserNamespace:
         """Multi-layer image (python:3.11-slim, 4+ layers) works in rootless."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image="python:3.11-slim",
             working_dir="/tmp",
@@ -441,7 +444,7 @@ class TestUserNamespace:
         """Two images sharing base layers reuse cached layers in rootless."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         sandboxes = []
         for i, img in enumerate(["python:3.11-slim", "python:3.12-slim"]):
             config = SandboxConfig(
@@ -464,7 +467,7 @@ class TestUserNamespace:
         """Read-only rootfs works in userns mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -486,7 +489,7 @@ class TestUserNamespace:
         """Read-write volume works in userns mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "input.txt").write_text("from host")
@@ -512,7 +515,7 @@ class TestUserNamespace:
         """Read-only volume works in userns mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "data.txt").write_text("read only")
@@ -538,7 +541,7 @@ class TestUserNamespace:
         """Custom hostname works in userns mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -561,7 +564,7 @@ class TestUserNamespace:
 
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image="python:3.11-slim",
             working_dir="/tmp",
@@ -589,7 +592,7 @@ class TestUserNamespace:
         """net_isolate=True without port_map gives loopback-only in rootless."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -636,7 +639,7 @@ class TestSharedNetwork:
     def _skip_if_not_rootless(self):
         if os.geteuid() == 0:
             pytest.skip("must run as non-root")
-        _requires_docker()
+        _requires_gobin()
 
     def test_shared_netns_between_sandboxes(self, tmp_path, shared_cache_dir):
         """Two sandboxes sharing a SharedNetwork have the same netns."""
@@ -866,7 +869,7 @@ class TestMappedUidCleanup:
     def test_delete_cleans_mapped_uid_files(self, tmp_path, shared_cache_dir):
         """delete() should fully remove env dir even with mapped-uid files."""
         self._skip_if_no_full_mapping()
-        _requires_docker()
+        _requires_gobin()
 
         env_dir = tmp_path / "envs" / "mapped-uid-del"
         config = SandboxConfig(
@@ -908,7 +911,7 @@ class TestMappedUidCleanup:
     def test_reset_cleans_mapped_uid_dead_dirs(self, tmp_path, shared_cache_dir):
         """reset() should clean dead dirs that contain mapped-uid files."""
         self._skip_if_no_full_mapping()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -966,7 +969,7 @@ class TestDevices:
     def test_device_passthrough(self, tmp_path, shared_cache_dir):
         """Passed-through device should be accessible."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1006,7 +1009,7 @@ class TestHardening:
 
     def test_oom_score_adj(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1024,7 +1027,7 @@ class TestHardening:
 
     def test_cpuset(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1057,7 +1060,7 @@ class TestLandlockRootful:
     def test_writable_paths(self, tmp_path, shared_cache_dir):
         """Only listed paths should be writable."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1085,7 +1088,7 @@ class TestLandlockRootful:
     def test_writable_paths_reads_unrestricted(self, tmp_path, shared_cache_dir):
         """When only writable_paths is set, reads should be unrestricted."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1106,7 +1109,7 @@ class TestLandlockRootful:
     def test_readable_paths(self, tmp_path, shared_cache_dir):
         """Only listed paths should be readable when readable_paths is set."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1132,7 +1135,7 @@ class TestLandlockRootful:
     def test_writable_and_readable_paths(self, tmp_path, shared_cache_dir):
         """Both read and write restrictions should work together."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1163,7 +1166,7 @@ class TestLandlockRootful:
     def test_writable_paths_after_reset(self, tmp_path, shared_cache_dir):
         """Landlock should still be enforced after sandbox reset."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1191,7 +1194,7 @@ class TestLandlockRootful:
     def test_allowed_ports(self, tmp_path, shared_cache_dir):
         """Only listed TCP ports should be connectable."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         abi = _landlock_abi_version()
         if abi < 4:
@@ -1223,7 +1226,7 @@ class TestLandlockRootful:
     def test_landlock_feature_flag(self, tmp_path, shared_cache_dir):
         """features dict should reflect Landlock status."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1269,7 +1272,7 @@ class TestLandlockRootless:
         """writable_paths should restrict writes in rootless mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1294,7 +1297,7 @@ class TestLandlockRootless:
         """readable_paths should restrict reads in rootless mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1317,7 +1320,7 @@ class TestLandlockRootless:
         """Landlock should survive reset in rootless mode."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
         _requires_landlock()
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1352,7 +1355,7 @@ class TestRenamReset:
     def test_many_files_reset(self, tmp_path, shared_cache_dir):
         """Reset with 200 files (RL episode scenario)."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1374,7 +1377,7 @@ class TestRenamReset:
     def test_dead_dirs_cleaned_on_next_reset(self, tmp_path, shared_cache_dir):
         """Dead dirs from previous reset are cleaned at the start of next reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_base = str(tmp_path / "envs")
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1407,7 +1410,7 @@ class TestRenamReset:
     def test_no_dead_dirs_accumulate(self, tmp_path, shared_cache_dir):
         """Repeated resets should not accumulate dead dirs."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_base = str(tmp_path / "envs")
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1435,7 +1438,7 @@ class TestRenamReset:
     def test_delete_cleans_all_dead_dirs(self, tmp_path, shared_cache_dir):
         """delete() removes env_dir including any remaining dead dirs."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_base = str(tmp_path / "envs")
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1456,7 +1459,7 @@ class TestRenamReset:
     def test_dev_devices_survive_rename_reset(self, tmp_path, shared_cache_dir):
         """/dev devices should work after rename-based reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1600,7 +1603,7 @@ class TestConfigSurvivesReset:
     def test_seccomp_after_reset(self, tmp_path, shared_cache_dir):
         """seccomp BPF should remain active after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1622,7 +1625,7 @@ class TestConfigSurvivesReset:
     def test_hostname_after_reset(self, tmp_path, shared_cache_dir):
         """Custom hostname should persist after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1642,7 +1645,7 @@ class TestConfigSurvivesReset:
     def test_read_only_after_reset(self, tmp_path, shared_cache_dir):
         """read_only rootfs should still be enforced after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1664,7 +1667,7 @@ class TestConfigSurvivesReset:
     def test_dns_after_reset(self, tmp_path, shared_cache_dir):
         """Custom DNS config should persist after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1684,7 +1687,7 @@ class TestConfigSurvivesReset:
     def test_rw_volume_after_reset(self, tmp_path, shared_cache_dir):
         """rw volume should still be mounted and writable after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "host.txt").write_text("from_host")
@@ -1712,7 +1715,7 @@ class TestConfigSurvivesReset:
     def test_ro_volume_after_reset(self, tmp_path, shared_cache_dir):
         """ro volume should still be mounted and read-only after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "data.txt").write_text("read_only_data")
@@ -1738,7 +1741,7 @@ class TestConfigSurvivesReset:
     def test_net_isolate_after_reset(self, tmp_path, shared_cache_dir):
         """net_isolate should still be enforced after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1759,7 +1762,7 @@ class TestConfigSurvivesReset:
     def test_masked_paths_after_reset(self, tmp_path, shared_cache_dir):
         """Sensitive paths should remain masked after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1785,7 +1788,7 @@ class TestConfigSurvivesReset:
     def test_environment_after_reset(self, tmp_path, shared_cache_dir):
         """Custom environment variables should persist after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1805,7 +1808,7 @@ class TestConfigSurvivesReset:
     def test_snapshot_after_reset(self, tmp_path, shared_cache_dir):
         """Snapshots should work across resets."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1857,7 +1860,7 @@ class TestConfigCombinations:
     def test_read_only_with_ro_volume(self, tmp_path, shared_cache_dir):
         """read_only=True + volumes should work (mount points created before ro remount)."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "data.txt").write_text("vol_data")
@@ -1884,7 +1887,7 @@ class TestConfigCombinations:
     def test_read_only_with_rw_volume(self, tmp_path, shared_cache_dir):
         """read_only rootfs + rw volume: rootfs read-only but volume writable."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
 
@@ -1908,7 +1911,7 @@ class TestConfigCombinations:
     def test_read_only_with_cow_volume(self, tmp_path, shared_cache_dir):
         """read_only rootfs + cow volume: copy-on-write volume works."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "original.txt").write_text("original")
@@ -1935,7 +1938,7 @@ class TestConfigCombinations:
     def test_cow_volume_reset_reverts(self, tmp_path, shared_cache_dir):
         """cow volume changes should be reverted on reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "data.txt").write_text("original")
@@ -1965,7 +1968,7 @@ class TestConfigCombinations:
     def test_full_config_combo(self, tmp_path, shared_cache_dir):
         """All config options together: read_only + volumes + hostname + dns + net_isolate."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "test.txt").write_text("combo_data")
@@ -2000,7 +2003,7 @@ class TestConfigCombinations:
     def test_hostname_no_stderr_leak(self, tmp_path, shared_cache_dir):
         """Hostname setup errors should not leak into first command output."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -2021,7 +2024,7 @@ class TestConfigCombinations:
     def test_cow_volume_no_artifacts_after_delete(self, tmp_path, shared_cache_dir):
         """cow volume sandbox should leave no artifacts after delete."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         shared = tmp_path / "shared"
         shared.mkdir()
         (shared / "data.txt").write_text("cow_test")
@@ -2123,7 +2126,7 @@ class TestDevicesRootless:
     def test_fuse_device_passthrough(self, tmp_path, shared_cache_dir):
         """Bind-mounted /dev/fuse should be accessible in userns sandbox."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2142,7 +2145,7 @@ class TestDevicesRootless:
     def test_kvm_device_passthrough(self, tmp_path, shared_cache_dir):
         """Bind-mounted /dev/kvm should be accessible in userns sandbox."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/kvm"):
             pytest.skip("/dev/kvm not available")
         # Check user has kvm group (required for rootless KVM access)
@@ -2170,7 +2173,7 @@ class TestDevicesRootless:
     def test_device_survives_reset(self, tmp_path, shared_cache_dir):
         """Device passthrough should work after reset."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2189,7 +2192,7 @@ class TestDevicesRootless:
     def test_multiple_devices(self, tmp_path, shared_cache_dir):
         """Multiple devices can be passed through simultaneously."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         devices = []
         for dev in ["/dev/fuse", "/dev/kvm"]:
             if os.path.exists(dev) and os.access(dev, os.R_OK):
@@ -2215,7 +2218,7 @@ class TestDevicesRootless:
     def test_device_with_seccomp(self, tmp_path, shared_cache_dir):
         """Device passthrough works alongside seccomp filtering."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2242,7 +2245,7 @@ class TestDevicesRootless:
     def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
         """features dict should include 'devices' when devices configured."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2261,7 +2264,7 @@ class TestDevicesRootless:
     def test_nonexistent_device_graceful(self, tmp_path, shared_cache_dir):
         """Non-existent device should not crash sandbox creation."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -2285,7 +2288,7 @@ class TestDevicesRootless:
     def test_kvm_ioctl_works(self, tmp_path, shared_cache_dir):
         """KVM ioctl should not be blocked by seccomp (only TIOCSTI is blocked)."""
         self._skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/kvm"):
             pytest.skip("/dev/kvm not available")
         if not os.access("/dev/kvm", os.R_OK | os.W_OK):
@@ -2311,7 +2314,7 @@ class TestDevicesRootful:
     def test_fuse_device_passthrough(self, tmp_path, shared_cache_dir):
         """Bind-mounted /dev/fuse should be accessible in rootful sandbox."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2330,7 +2333,7 @@ class TestDevicesRootful:
     def test_device_survives_reset(self, tmp_path, shared_cache_dir):
         """Device passthrough should work after reset in rootful mode."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/fuse"):
             pytest.skip("/dev/fuse not available")
         config = SandboxConfig(
@@ -2349,7 +2352,7 @@ class TestDevicesRootful:
     def test_kvm_ioctl_rootful(self, tmp_path, shared_cache_dir):
         """KVM ioctl should work in rootful mode with seccomp."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not os.path.exists("/dev/kvm"):
             pytest.skip("/dev/kvm not available")
         config = SandboxConfig(
@@ -2369,7 +2372,7 @@ class TestDevicesRootful:
     def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
         """features dict should include 'devices' in rootful mode."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -2400,7 +2403,7 @@ class TestDockerParity:
     def _skip_if_root_or_no_docker(self):
         if os.geteuid() == 0:
             pytest.skip("parity tests run as non-root")
-        _requires_docker()
+        _requires_gobin()
 
     @pytest.fixture
     def sandbox(self, tmp_path, shared_cache_dir):
@@ -2535,32 +2538,23 @@ class TestConcurrentSharedLayers:
     def _skip_if_no_docker_or_root(self):
         if os.geteuid() == 0:
             pytest.skip("concurrent layer tests run as non-root")
-        _requires_docker()
 
     def test_concurrent_sandboxes_shared_layers(self, tmp_path, shared_cache_dir):
-        """Start 4 sandboxes concurrently from images that share base layers."""
+        """Start 4 sandboxes concurrently from the same image (shared layers)."""
         import concurrent.futures
 
-        # Use the same base image with different names to simulate
-        # shared layers.  TEST_IMAGE is pulled once; we tag it 4 times
-        # to create 4 "different" images that share all layers.
-        tags = [f"concurrent-test-{i}:latest" for i in range(4)]
-        for tag in tags:
-            subprocess.run(
-                ["docker", "tag", TEST_IMAGE, tag],
-                capture_output=True, check=True,
-            )
-
+        # All 4 sandboxes use the same image — layers are shared via
+        # containers/storage's zero-copy diff paths.
         sandboxes = []
         try:
             configs = [
                 SandboxConfig(
-                    image=tag,
+                    image=TEST_IMAGE,
                     working_dir="/workspace",
                     env_base_dir=str(tmp_path / f"env-{i}"),
                     rootfs_cache_dir=shared_cache_dir,
                 )
-                for i, tag in enumerate(tags)
+                for i in range(4)
             ]
 
             # Start all 4 in parallel threads
@@ -2595,30 +2589,19 @@ class TestConcurrentSharedLayers:
                     box.delete()
                 except Exception:
                     pass
-            for tag in tags:
-                subprocess.run(["docker", "rmi", tag], capture_output=True)
 
     def test_delete_during_concurrent_use(self, tmp_path, shared_cache_dir):
         """Deleting one sandbox doesn't break another using shared layers."""
-        import concurrent.futures
-
-        tags = [f"del-test-{i}:latest" for i in range(2)]
-        for tag in tags:
-            subprocess.run(
-                ["docker", "tag", TEST_IMAGE, tag],
-                capture_output=True, check=True,
-            )
-
         sandboxes = []
         try:
             configs = [
                 SandboxConfig(
-                    image=tag,
+                    image=TEST_IMAGE,
                     working_dir="/workspace",
                     env_base_dir=str(tmp_path / f"del-env-{i}"),
                     rootfs_cache_dir=shared_cache_dir,
                 )
-                for i, tag in enumerate(tags)
+                for i in range(2)
             ]
 
             # Start both
@@ -2644,5 +2627,3 @@ class TestConcurrentSharedLayers:
                     box.delete()
                 except Exception:
                     pass
-            for tag in tags:
-                subprocess.run(["docker", "rmi", tag], capture_output=True)

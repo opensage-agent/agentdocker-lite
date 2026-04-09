@@ -760,11 +760,11 @@ class TestRegistryFirstIntegration:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
 
-        # This should use the registry-first path (no Docker pull needed)
+        # Pull if not already in containers/storage
         layer_dirs = prepare_rootfs_layers_from_docker(
             "alpine:3.19",
             cache_dir,
-            pull=False,  # Don't require Docker pull
+            pull=True,
         )
 
         assert len(layer_dirs) >= 1
@@ -787,9 +787,9 @@ class TestRegistryFirstIntegration:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
 
-        # First extraction
-        dirs1 = prepare_rootfs_layers_from_docker("alpine:3.19", cache_dir, pull=False)
-        # Second extraction should use cache (much faster)
+        # First call (pulls if needed)
+        dirs1 = prepare_rootfs_layers_from_docker("alpine:3.19", cache_dir, pull=True)
+        # Second call uses cached layers from containers/storage (no pull)
         dirs2 = prepare_rootfs_layers_from_docker("alpine:3.19", cache_dir, pull=False)
 
         assert dirs1 == dirs2

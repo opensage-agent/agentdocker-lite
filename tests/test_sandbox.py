@@ -27,15 +27,21 @@ def _requires_root():
         pytest.skip("requires root")
 
 
-def _requires_docker():
-    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-        pytest.skip("requires Docker")
+def _requires_gobin():
+    """Skip if images cannot be pulled (needs Go binary or Docker daemon)."""
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
+    if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
+        return  # Go binary available — can pull via containers/storage
+    if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
+        return  # Docker available — can pull via daemon
+    pytest.skip("requires nitrobox-core Go binary or Docker daemon")
 
 
 @pytest.fixture
 def sandbox(tmp_path, shared_cache_dir):
     _requires_root()
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -55,7 +61,7 @@ def sandbox(tmp_path, shared_cache_dir):
 class TestLifecycle:
     def test_create_and_delete(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -100,7 +106,7 @@ class TestRun:
 
     def test_environment(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             environment={"MY_VAR": "test_value_123"},
@@ -249,7 +255,7 @@ class TestReset:
     def test_delete_cleans_dead_dirs(self, tmp_path, shared_cache_dir):
         """delete() removes all dead dirs left by rename-based reset."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -275,7 +281,7 @@ class TestReset:
 class TestConcurrency:
     def test_parallel_sandboxes(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         n = 2  # CI runners have limited resources
 
         def run_worker(i):
@@ -336,7 +342,7 @@ class TestPerformance:
 @pytest.fixture
 def tty_sandbox(tmp_path, shared_cache_dir):
     _requires_root()
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -445,7 +451,7 @@ class TestNetIsolate:
     def test_loopback_only(self, tmp_path, shared_cache_dir):
         """With net_isolate, only loopback should exist."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -555,7 +561,7 @@ class TestSaveAsImage:
 class TestVolumes:
     def test_ro_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         host_dir = tmp_path / "host_data"
         host_dir.mkdir()
         (host_dir / "file.txt").write_text("host_content")
@@ -581,7 +587,7 @@ class TestVolumes:
 
     def test_rw_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         host_dir = tmp_path / "host_rw"
         host_dir.mkdir()
 
@@ -614,7 +620,7 @@ class TestObservability:
 
     def test_pressure(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -659,7 +665,7 @@ class TestFsIsolation:
     def test_two_sandboxes_isolated(self, tmp_path, shared_cache_dir):
         """Two sandboxes sharing the same image have independent filesystems."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -746,7 +752,7 @@ class TestResourceLimits:
     def test_memory_limit_enforced(self, tmp_path, shared_cache_dir):
         """A process exceeding memory_max should be killed or fail to allocate."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -769,7 +775,7 @@ class TestResourceLimits:
     def test_pids_limit_enforced(self, tmp_path, shared_cache_dir):
         """pids_max should be correctly written to the cgroup."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -795,7 +801,7 @@ class TestResourceLimits:
     def test_cpu_max_accepted(self, tmp_path, shared_cache_dir):
         """cpu_max config should not cause errors during sandbox creation."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -913,7 +919,7 @@ class TestEdgeCases:
     def test_run_after_delete(self, tmp_path, shared_cache_dir):
         """Running a command after delete should fail gracefully."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1069,7 +1075,7 @@ class TestPortMap:
     def test_port_mapping(self, tmp_path, shared_cache_dir):
         """port_map forwards host port to sandbox server."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_tun()
         import urllib.request
 
@@ -1106,7 +1112,7 @@ class TestPortMap:
         """Loopback is automatically brought up inside net-isolated sandbox."""
         _requires_root()
         _requires_tun()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image="python:3.11-slim",
@@ -1140,7 +1146,7 @@ class TestPortMap:
         """delete() with port_map leaves no stale netns bind mounts (rootful)."""
         _requires_root()
         _requires_tun()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1164,7 +1170,7 @@ class TestPortMap:
         """delete() with port_map leaves no stale .netns bind mounts (userns)."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1192,7 +1198,7 @@ class TestCleanupVerification:
     def test_delete_removes_all_files(self, tmp_path, shared_cache_dir):
         """delete() removes the entire env_dir, no leftovers."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1213,7 +1219,7 @@ class TestCleanupVerification:
     def test_delete_kills_shell_process(self, tmp_path, shared_cache_dir):
         """delete() kills the persistent shell process — no zombies."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1234,7 +1240,7 @@ class TestCleanupVerification:
     def test_reset_no_mount_leak(self, tmp_path, shared_cache_dir):
         """Multiple resets don't accumulate bind mounts."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1258,7 +1264,7 @@ class TestCleanupVerification:
     def test_delete_no_stale_cgroup(self, tmp_path, shared_cache_dir):
         """delete() removes the cgroup directory."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1275,6 +1281,163 @@ class TestCleanupVerification:
 
 
 # ------------------------------------------------------------------ #
+#  Crash + cleanup_stale                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestCleanupAfterCrash:
+    """Verify cleanup_stale recovers all resources after a simulated crash.
+
+    Creates a real sandbox, kills the shell with SIGKILL to simulate a
+    crash, then verifies that cleanup_stale removes overlay mounts,
+    cgroup directories, and sandbox env directories (including
+    mapped-UID files from userns sandboxes).
+    """
+
+    def test_cleanup_stale_after_sigkill(self, tmp_path, shared_cache_dir):
+        """SIGKILL the shell, then cleanup_stale should remove everything."""
+        _requires_gobin()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="crash-test")
+        sandbox_dir = tmp_path / "envs" / "crash-test"
+
+        # Write some files (creates mapped-UID files in overlay upper)
+        box.run("touch /workspace/file1 /workspace/file2")
+
+        # Record state before crash
+        pid = box._persistent_shell.pid
+        cgroup_path = box._cgroup_path
+
+        # Simulate crash: kill shell with SIGKILL (no cleanup runs)
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+
+        # Sandbox dir should still exist (orphaned)
+        assert sandbox_dir.exists(), "sandbox dir should still exist after crash"
+
+        # Now run cleanup_stale
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1, f"cleanup_stale should have cleaned at least 1, got {cleaned}"
+
+        # Verify: no sandbox dir (or only stale userns mounts that need root)
+        if sandbox_dir.exists():
+            rootfs = sandbox_dir / "rootfs"
+            if rootfs.exists() and rootfs.is_mount():
+                pytest.skip(
+                    "stale userns mount — needs root or reboot to unmount "
+                    "(known Linux limitation for rootless)"
+                )
+            else:
+                pytest.fail(
+                    f"sandbox dir not cleaned: "
+                    f"{list(sandbox_dir.iterdir()) if sandbox_dir.exists() else 'N/A'}"
+                )
+
+        # Verify: no mounts under env_dir
+        mount_output = subprocess.run(["mount"], capture_output=True, text=True).stdout
+        assert "crash-test" not in mount_output, \
+            f"stale mount found: {[l for l in mount_output.splitlines() if 'crash-test' in l]}"
+
+        # Verify: no cgroup
+        if cgroup_path:
+            assert not cgroup_path.exists(), f"cgroup not cleaned: {cgroup_path}"
+
+    def test_cleanup_stale_mapped_uid_files(self, tmp_path, shared_cache_dir):
+        """Crash with mapped-UID files in overlay upper — cleanup must use rmtree_mapped."""
+        _requires_gobin()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="crash-mapped-uid")
+        sandbox_dir = tmp_path / "envs" / "crash-mapped-uid"
+
+        # Create files owned by different UIDs inside the sandbox
+        box.run("adduser --disabled-password --gecos '' testuser 2>/dev/null || true")
+        box.run("su testuser -c 'touch /workspace/owned_by_testuser'")
+
+        pid = box._persistent_shell.pid
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1
+
+        if sandbox_dir.exists():
+            rootfs = sandbox_dir / "rootfs"
+            if rootfs.exists() and rootfs.is_mount():
+                pytest.skip("stale userns mount — needs root")
+            else:
+                pytest.fail("sandbox with mapped-UID files not cleaned")
+
+    def test_cleanup_stale_multiple_crashed(self, tmp_path, shared_cache_dir):
+        """Multiple crashed sandboxes cleaned in one call."""
+        _requires_gobin()
+
+        env_dir = str(tmp_path / "envs")
+        boxes = []
+        for i in range(3):
+            config = SandboxConfig(
+                image=TEST_IMAGE,
+                working_dir="/workspace",
+                env_base_dir=env_dir,
+                rootfs_cache_dir=shared_cache_dir,
+            )
+            box = Sandbox(config, name=f"multi-crash-{i}")
+            box.run(f"echo sandbox-{i}")
+            boxes.append(box)
+
+        # Kill all shells
+        for box in boxes:
+            pid = box._persistent_shell.pid
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned == 3, f"expected 3 cleaned, got {cleaned}"
+
+    def test_cleanup_stale_orphan_no_pid(self, tmp_path, shared_cache_dir):
+        """Sandbox dir with no .pid file (partial init crash) is cleaned."""
+        _requires_gobin()
+
+        env_dir = str(tmp_path / "envs")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="orphan-test")
+        sandbox_dir = tmp_path / "envs" / "orphan-test"
+
+        # Write files, then simulate partial cleanup: remove .pid but leave dirs
+        box.run("touch /workspace/data")
+        pid = box._persistent_shell.pid
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        pid_file = sandbox_dir / ".pid"
+        if pid_file.exists():
+            pid_file.unlink()
+
+        # upper/ and work/ exist but no .pid — this is the orphan case
+        assert (sandbox_dir / "upper").exists() or (sandbox_dir / "work").exists()
+
+        cleaned = Sandbox.cleanup_stale(env_dir)
+        assert cleaned >= 1, "orphan dir should be cleaned"
+
+
+# ------------------------------------------------------------------ #
 #  Layer cache                                                          #
 # ------------------------------------------------------------------ #
 
@@ -1283,7 +1446,7 @@ class TestLayerCache:
     def test_shared_layers(self, tmp_path, shared_cache_dir):
         """Two images sharing base layers reuse cached layers."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         cache_dir = Path(shared_cache_dir)
         configs = []
@@ -1317,7 +1480,7 @@ class TestLayerCache:
     def test_multi_layer_image(self, tmp_path, shared_cache_dir):
         """An image with many layers mounts and works correctly."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image="python:3.11-slim",  # 4 layers
@@ -1352,7 +1515,7 @@ class TestClone3Fallback:
     def test_threading_works_with_seccomp(self, tmp_path, shared_cache_dir):
         """clone3 returns ENOSYS so glibc falls back to clone(2), allowing threads."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image="python:3.11-slim",
             working_dir="/tmp",
@@ -1386,7 +1549,7 @@ class TestHostname:
     def test_custom_hostname(self, tmp_path, shared_cache_dir):
         """hostname= sets the UTS hostname inside the sandbox."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         # CI containers may have /proc/sys/kernel/hostname read-only and
         # may lack the hostname binary; skip if neither method works.
         import subprocess
@@ -1419,7 +1582,7 @@ class TestDnsReset:
 
     def test_dns_survives_reset(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1447,7 +1610,7 @@ class TestReadOnly:
     def test_read_only_rootfs(self, tmp_path, shared_cache_dir):
         """read_only=True makes root filesystem read-only."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -1469,7 +1632,7 @@ class TestReadOnly:
     def test_read_only_survives_reset(self, tmp_path, shared_cache_dir):
         """read_only is preserved after reset()."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -1490,7 +1653,7 @@ class TestReadOnly:
     def test_read_only_without_seccomp(self, tmp_path, shared_cache_dir):
         """read_only works even when seccomp is disabled."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -1942,7 +2105,7 @@ class TestFromDockerRun:
 class TestGetImageConfig:
     def test_basic(self):
         """get_image_config returns cmd, entrypoint, env, working_dir."""
-        _requires_docker()
+        _requires_gobin()
         from nitrobox import get_image_config
         cfg = get_image_config("python:3.11-slim")
         assert cfg is not None
@@ -1965,7 +2128,7 @@ class TestDeleteCleansBackground:
     def test_delete_kills_background(self, tmp_path, shared_cache_dir):
         """delete() should kill background processes before unmounting."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -2027,23 +2190,580 @@ class TestRegistry:
         cfg = get_image_metadata_from_registry("python:3.11-slim")
         assert cfg["cmd"] == ["python3"]
 
-    def test_registry_fallback_layers(self, tmp_path):
-        """Layer extraction works via registry API directly."""
+    def test_registry_pull_to_storage(self, tmp_path):
+        """Image pull via containers/storage works."""
         _skip_if_no_registry()
-        import nitrobox.rootfs as rf
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+        )
 
-        from nitrobox._registry import get_image_metadata_from_registry
-        metadata = get_image_metadata_from_registry("ubuntu:22.04")
-        diff_ids = metadata["diff_ids"]
+        # Pull if not already in store
+        if _get_store_layers("alpine:latest") is None:
+            assert _containers_storage_pull("alpine:latest"), "pull failed"
 
-        layers_dir = tmp_path / "cache" / "layers"
-        layers_dir.mkdir(parents=True, exist_ok=True)
-        needed = set(diff_ids)
-        rf._extract_layers_from_registry("ubuntu:22.04", needed, layers_dir)
+        layers = _get_store_layers("alpine:latest")
+        assert layers is not None
+        assert len(layers) >= 1
+        assert (layers[0] / "bin").exists()
 
-        layer_dirs = [layers_dir / rf._safe_cache_key(d) for d in diff_ids]
-        assert len(layer_dirs) >= 1
-        assert (layer_dirs[0] / "bin").exists() or (layer_dirs[0] / "usr").exists()
+
+# ------------------------------------------------------------------ #
+#  Image pull pipeline                                                   #
+# ------------------------------------------------------------------ #
+
+
+class TestImagePullPipeline:
+    """Test the image pull pipeline:
+
+    1. containers/storage local cache hit (zero-copy, instant)
+    2. ``docker://`` registry pull (standard path)
+    3. ``docker-daemon:`` fallback (for local-only Docker images)
+
+    Plus: image delete, pull failure handling.
+    """
+
+    @staticmethod
+    def _skip_if_no_gobin():
+        from nitrobox._gobin import gobin
+        import shutil
+        if not shutil.which(gobin()) and not os.path.isfile(gobin()):
+            pytest.skip("nitrobox-core Go binary not found")
+
+    @staticmethod
+    def _skip_if_no_docker():
+        """Skip if Docker daemon is not accessible."""
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("Docker daemon not available")
+
+    # -- Layer 1: containers/storage local cache ---------------------- #
+
+    def test_store_local_hit(self):
+        """Image already in containers/storage is returned without pull."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+            prepare_rootfs_layers_from_docker,
+        )
+        from pathlib import Path
+
+        # Ensure alpine is in store (pull once)
+        if _get_store_layers("alpine:latest") is None:
+            assert _containers_storage_pull("alpine:latest"), "initial pull failed"
+
+        # Now call with pull=False — should succeed from local store
+        layers = prepare_rootfs_layers_from_docker("alpine:latest", Path("/tmp"), pull=False)
+        assert layers is not None
+        assert len(layers) >= 1
+        assert layers[0].exists()
+
+    def test_store_local_miss_pull_false_raises(self):
+        """pull=False with image not in store raises RuntimeError."""
+        self._skip_if_no_gobin()
+        from nitrobox.image.layers import prepare_rootfs_layers_from_docker
+        from pathlib import Path
+
+        with pytest.raises(RuntimeError, match="not found"):
+            prepare_rootfs_layers_from_docker(
+                "nonexistent/image:v999", Path("/tmp"), pull=False,
+            )
+
+    # -- Layer 2: Registry pull ---------------------------------------- #
+
+    def test_pull_from_registry(self):
+        """Image not in store is pulled from registry."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+        )
+
+        image = "alpine:3.19"
+
+        # Remove from containers/storage
+        if _get_store_layers(image) is not None:
+            self._delete_image(image)
+
+        transport = _containers_storage_pull(image)
+        assert transport, "registry pull failed"
+        assert transport == "docker", \
+            f"expected docker (registry) transport, got {transport!r}"
+
+        layers = _get_store_layers(image)
+        assert layers is not None
+        assert len(layers) >= 1
+        has_content = any(
+            (d / "bin").exists() or (d / "usr").exists()
+            for d in layers
+        )
+        assert has_content, "pulled image has no rootfs content"
+
+    # -- Layer 3: Docker daemon fallback ------------------------------- #
+
+    def test_pull_docker_daemon_fallback(self):
+        """Image only in Docker (not on registry) uses docker-daemon fallback."""
+        self._skip_if_no_gobin()
+        self._skip_if_no_docker()
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+        )
+
+        # Build a local-only image in Docker (not on any registry)
+        tag = "nbx-test-local-only:latest"
+        subprocess.run(
+            ["docker", "build", "-t", tag, "-"],
+            input=b"FROM alpine:latest\nRUN echo local > /marker.txt\n",
+            capture_output=True, timeout=120,
+        )
+
+        # Remove from containers/storage
+        if _get_store_layers(tag) is not None:
+            self._delete_image(tag)
+
+        # Pull — registry fails (image doesn't exist), falls back to docker-daemon
+        transport = _containers_storage_pull(tag)
+        assert transport, "pull failed"
+        assert transport == "docker-daemon", \
+            f"expected docker-daemon fallback, got {transport!r}"
+
+        layers = _get_store_layers(tag)
+        assert layers is not None
+
+        # Cleanup
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True)
+
+    def test_pull_nonexistent_image_fails(self):
+        """Pulling a nonexistent image returns False."""
+        self._skip_if_no_gobin()
+        from nitrobox.image.layers import _containers_storage_pull
+
+        result = _containers_storage_pull("nonexistent-registry.invalid/no-image:v999")
+        assert result is False
+
+    # -- Image delete ------------------------------------------------- #
+
+    @staticmethod
+    def _delete_image(image: str) -> subprocess.CompletedProcess:
+        """Call image-delete with same graph_root/run_root as pull."""
+        import json
+        from nitrobox._gobin import gobin
+        from nitrobox.image.layers import _containers_storage_root
+        graph_root = _containers_storage_root()
+        if graph_root is None:
+            from pathlib import Path
+            graph_root = Path.home() / ".local/share/containers/storage"
+        req = json.dumps({
+            "image": image,
+            "graph_root": str(graph_root),
+            "run_root": f"/tmp/nitrobox-containers-run-{os.getuid()}",
+        })
+        env = dict(os.environ)
+        env["_NITROBOX_DELETE_CONFIG"] = req
+        return subprocess.run(
+            [gobin(), "image-delete"],
+            capture_output=True, env=env, timeout=30,
+        )
+
+    def test_image_delete(self):
+        """image-delete removes an image from containers/storage."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _get_store_layers,
+        )
+
+        image = "alpine:3.19"
+
+        # Ensure it's in store
+        if _get_store_layers(image) is None:
+            assert _containers_storage_pull(image), "pull failed"
+        assert _get_store_layers(image) is not None
+
+        # Delete it
+        r = self._delete_image(image)
+        assert r.returncode == 0, f"image-delete failed: {r.stderr.decode()[:200]}"
+
+        # Verify gone
+        assert _get_store_layers(image) is None, "image still in store after delete"
+
+    def test_image_delete_nonexistent_is_noop(self):
+        """Deleting a nonexistent image succeeds (no-op, like docker rmi)."""
+        self._skip_if_no_gobin()
+
+        r = self._delete_image("nonexistent/image:v999")
+        assert r.returncode == 0
+
+    # -- End-to-end: prepare_rootfs_layers_from_docker ---------------- #
+
+    def test_prepare_rootfs_full_pipeline(self):
+        """prepare_rootfs_layers_from_docker pulls and caches end-to-end."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import (
+            _get_store_layers,
+            prepare_rootfs_layers_from_docker,
+        )
+        from nitrobox._gobin import gobin
+        from pathlib import Path
+
+        image = "alpine:3.19"
+
+        # Clean slate: remove from store
+        if _get_store_layers(image) is not None:
+            self._delete_image(image)
+
+        # First call: should pull (from Docker daemon or registry)
+        layers1 = prepare_rootfs_layers_from_docker(image, Path("/tmp"), pull=True)
+        assert len(layers1) >= 1
+        assert all(d.exists() for d in layers1)
+
+        # Second call: should hit containers/storage cache (no pull)
+        layers2 = prepare_rootfs_layers_from_docker(image, Path("/tmp"), pull=False)
+        assert layers1 == layers2
+
+
+# ------------------------------------------------------------------ #
+#  Layer locking                                                        #
+# ------------------------------------------------------------------ #
+
+
+class TestLayerLocking:
+    """Test acquire_layer_locks / release_layer_locks / remove_layer_locked."""
+
+    def test_acquire_release_round_trip(self, tmp_path):
+        """Acquire shared locks, then release — no errors."""
+        from nitrobox.image.layers import acquire_layer_locks, release_layer_locks
+
+        dirs = []
+        for i in range(3):
+            d = tmp_path / f"layer_{i}" / "diff"
+            d.mkdir(parents=True)
+            dirs.append(d)
+
+        fds = acquire_layer_locks(dirs)
+        assert len(fds) == 3
+        assert all(isinstance(fd, int) and fd >= 0 for fd in fds)
+        release_layer_locks(fds)
+
+    def test_concurrent_shared_locks(self, tmp_path):
+        """Multiple shared locks on the same layer don't block."""
+        from nitrobox.image.layers import acquire_layer_locks, release_layer_locks
+
+        d = tmp_path / "shared_layer" / "diff"
+        d.mkdir(parents=True)
+
+        fds1 = acquire_layer_locks([d])
+        fds2 = acquire_layer_locks([d])  # should not block
+        assert len(fds1) == 1 and len(fds2) == 1
+
+        release_layer_locks(fds1)
+        release_layer_locks(fds2)
+
+    def test_remove_layer_locked_skips_when_held(self, tmp_path):
+        """remove_layer_locked skips deletion when shared lock is held."""
+        from nitrobox.image.layers import (
+            acquire_layer_locks,
+            release_layer_locks,
+            remove_layer_locked,
+        )
+
+        d = tmp_path / "locked_layer" / "diff"
+        d.mkdir(parents=True)
+        (d / "file.txt").write_text("keep me")
+
+        # Hold a shared lock
+        fds = acquire_layer_locks([d])
+        # Try to delete — should skip (LOCK_NB fails)
+        remove_layer_locked(d)
+        assert d.exists(), "layer dir should survive when lock is held"
+        assert (d / "file.txt").exists()
+
+        release_layer_locks(fds)
+
+    def test_remove_layer_locked_deletes_when_free(self, tmp_path):
+        """remove_layer_locked deletes when no lock is held."""
+        from nitrobox.image.layers import remove_layer_locked
+
+        d = tmp_path / "free_layer" / "diff"
+        d.mkdir(parents=True)
+        (d / "file.txt").write_text("delete me")
+
+        remove_layer_locked(d)
+        assert not d.exists(), "layer dir should be deleted when no lock held"
+
+
+# ------------------------------------------------------------------ #
+#  rmtree_mapped                                                        #
+# ------------------------------------------------------------------ #
+
+
+class TestRmtreeMapped:
+    """Test rmtree_mapped for normal and mapped-UID directories."""
+
+    def test_normal_directory(self, tmp_path):
+        """rmtree_mapped removes a normal user-owned directory."""
+        from nitrobox.image.layers import rmtree_mapped
+
+        d = tmp_path / "normal"
+        d.mkdir()
+        (d / "file.txt").write_text("hello")
+        (d / "sub").mkdir()
+        (d / "sub" / "nested.txt").write_text("nested")
+
+        rmtree_mapped(d)
+        assert not d.exists()
+
+    def test_nonexistent_is_noop(self, tmp_path):
+        """rmtree_mapped on nonexistent path does nothing."""
+        from nitrobox.image.layers import rmtree_mapped
+
+        rmtree_mapped(tmp_path / "does_not_exist")  # should not raise
+
+    def test_mapped_uid_directory(self, tmp_path, shared_cache_dir):
+        """rmtree_mapped handles directories with mapped-UID files."""
+        _requires_gobin()
+        from nitrobox import Sandbox, SandboxConfig
+        from nitrobox.image.layers import rmtree_mapped
+
+        # Create a sandbox that writes files as mapped UIDs
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="rmtree-test")
+        box.run("touch /workspace/mapped_file")
+
+        # Get the upper dir (contains mapped-UID files)
+        upper = box._upper_dir
+        assert upper is not None and upper.exists()
+
+        # Kill shell, copy upper to test dir, then clean up sandbox
+        pid = box._persistent_shell.pid
+        import shutil
+        test_dir = tmp_path / "mapped_copy"
+        shutil.copytree(str(upper), str(test_dir))
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        Sandbox.cleanup_stale(str(tmp_path / "envs"))
+
+        # Now test rmtree_mapped on the copy
+        if test_dir.exists():
+            rmtree_mapped(test_dir)
+            assert not test_dir.exists(), "mapped-UID dir should be removed"
+
+
+# ------------------------------------------------------------------ #
+#  Go binary commands: image-layers, image-list                         #
+# ------------------------------------------------------------------ #
+
+
+class TestGoImageCommands:
+    """Test image-layers and image-list Go commands."""
+
+    @staticmethod
+    def _skip_if_no_gobin():
+        from nitrobox._gobin import gobin
+        import shutil
+        if not shutil.which(gobin()) and not os.path.isfile(gobin()):
+            pytest.skip("nitrobox-core Go binary not found")
+
+    @staticmethod
+    def _ensure_image(image: str):
+        """Ensure image is in containers/storage."""
+        from nitrobox.image.layers import _get_store_layers, _containers_storage_pull
+        if _get_store_layers(image) is None:
+            result = _containers_storage_pull(image)
+            assert result, f"failed to pull {image}"
+
+    def test_image_layers(self):
+        """ImageLayers returns correct overlay diff paths via Python API."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers
+
+        image = "alpine:latest"
+        self._ensure_image(image)
+
+        layers = _get_store_layers(image)
+        assert layers is not None, "alpine should be in store"
+        assert len(layers) >= 1
+        for d in layers:
+            assert d.is_dir(), f"layer path not a directory: {d}"
+            # Should be an overlay diff directory
+            assert "diff" in str(d) or "dir" in str(d)
+
+    def test_image_list(self):
+        """_get_store_layers can find images after pull."""
+        self._skip_if_no_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers
+
+        image = "alpine:latest"
+        self._ensure_image(image)
+
+        # Verify the image is findable by _get_store_layers
+        layers = _get_store_layers(image)
+        assert layers is not None, "alpine should be in store after pull"
+        assert len(layers) >= 1
+        # Verify we can read files from the layer
+        has_content = any(
+            (d / "bin").exists() or (d / "usr").exists()
+            for d in layers
+        )
+        assert has_content, "pulled image has no rootfs content"
+
+    def test_image_layers_nonexistent(self):
+        """_get_store_layers returns None for nonexistent image."""
+        from nitrobox.image.layers import _get_store_layers
+
+        assert _get_store_layers("nonexistent/image:v999") is None
+
+
+# ------------------------------------------------------------------ #
+#  _containers_storage_root and _get_store_layers edge cases            #
+# ------------------------------------------------------------------ #
+
+
+class TestContainersStorageHelpers:
+    """Unit tests for storage helper functions."""
+
+    def test_storage_root_env_override(self, tmp_path, monkeypatch):
+        """CONTAINERS_STORAGE_ROOT env var overrides default path."""
+        from nitrobox.image.layers import _containers_storage_root
+
+        custom = tmp_path / "custom_store"
+        custom.mkdir()
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(custom))
+        assert _containers_storage_root() == custom
+
+    def test_storage_root_default(self, monkeypatch):
+        """Without env var, returns ~/.local/share/containers/storage or None."""
+        from nitrobox.image.layers import _containers_storage_root
+
+        monkeypatch.delenv("CONTAINERS_STORAGE_ROOT", raising=False)
+        result = _containers_storage_root()
+        # Either None (dir doesn't exist) or the default path
+        if result is not None:
+            assert "containers/storage" in str(result)
+
+    def test_get_store_layers_nonexistent_store(self, monkeypatch):
+        """_get_store_layers returns None when store doesn't exist."""
+        from nitrobox.image.layers import _get_store_layers
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", "/tmp/nonexistent_store_12345")
+        assert _get_store_layers("alpine:latest") is None
+
+    def test_get_store_layers_name_matching(self):
+        """_get_store_layers matches images by name variants."""
+        _requires_gobin()
+        _skip_if_no_registry()
+        from nitrobox.image.layers import _get_store_layers, _containers_storage_pull
+
+        # Ensure alpine is in store
+        if _get_store_layers("alpine:latest") is None:
+            _containers_storage_pull("alpine:latest")
+
+        # Exact match
+        layers = _get_store_layers("alpine:latest")
+        assert layers is not None
+
+        # Without :latest tag
+        layers2 = _get_store_layers("alpine")
+        assert layers2 is not None
+
+    def test_get_store_layers_empty_store(self, tmp_path, monkeypatch):
+        """_get_store_layers returns None for empty store directory."""
+        from nitrobox.image.layers import _get_store_layers
+
+        empty_store = tmp_path / "empty_store"
+        empty_store.mkdir()
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(empty_store))
+        assert _get_store_layers("alpine:latest") is None
+
+    def test_read_config_from_containers_storage(self, tmp_path, monkeypatch):
+        """_read_config_from_containers_storage reads WORKDIR/CMD/ENV from OCI config blob."""
+        import base64, json
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        # Build a fake containers/storage tree
+        store = tmp_path / "store"
+        images_dir = store / "overlay-images"
+        images_dir.mkdir(parents=True)
+
+        img_id = "abc123def456" * 4 + "00000000"  # 56 chars
+        img_id = img_id[:64]
+
+        # Write images.json
+        (images_dir / "images.json").write_text(json.dumps([{
+            "id": img_id,
+            "names": ["localhost/myapp-main:latest"],
+            "layer": "somelayer",
+        }]))
+
+        # Write OCI config blob in big-data dir
+        bd_dir = images_dir / img_id
+        bd_dir.mkdir()
+
+        oci_config = {
+            "config": {
+                "Env": ["PATH=/usr/bin", "FOO=bar"],
+                "Cmd": ["/bin/sh"],
+                "Entrypoint": ["python", "app.py"],
+                "WorkingDir": "/app",
+                "ExposedPorts": {"8080/tcp": {}},
+            },
+            "rootfs": {
+                "type": "layers",
+                "diff_ids": ["sha256:aaa", "sha256:bbb"],
+            },
+        }
+
+        # Write manifest pointing to config
+        config_digest = f"sha256:{img_id}"
+        (bd_dir / "manifest").write_text(json.dumps({
+            "config": {"digest": config_digest},
+        }))
+
+        # Write config blob with base64-encoded filename
+        encoded_name = "=" + base64.b64encode(config_digest.encode()).decode()
+        (bd_dir / encoded_name).write_text(json.dumps(oci_config))
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(store))
+
+        cfg = _read_config_from_containers_storage("localhost/myapp-main:latest")
+        assert cfg is not None
+        assert cfg["working_dir"] == "/app"
+        assert cfg["cmd"] == ["/bin/sh"]
+        assert cfg["entrypoint"] == ["python", "app.py"]
+        assert cfg["env"] == {"PATH": "/usr/bin", "FOO": "bar"}
+        assert cfg["exposed_ports"] == [8080]
+        assert cfg["diff_ids"] == ["sha256:aaa", "sha256:bbb"]
+
+    def test_read_config_from_containers_storage_miss(self, tmp_path, monkeypatch):
+        """_read_config_from_containers_storage returns None for unknown images."""
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        store = tmp_path / "store"
+        images_dir = store / "overlay-images"
+        images_dir.mkdir(parents=True)
+        (images_dir / "images.json").write_text("[]")
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", str(store))
+        assert _read_config_from_containers_storage("no-such-image") is None
+
+    def test_read_config_from_containers_storage_no_store(self, monkeypatch):
+        """_read_config_from_containers_storage returns None when store doesn't exist."""
+        from nitrobox.image.store import _read_config_from_containers_storage
+
+        monkeypatch.setenv("CONTAINERS_STORAGE_ROOT", "/tmp/nonexistent_xyz_99999")
+        assert _read_config_from_containers_storage("anything") is None
 
 
 # ------------------------------------------------------------------ #
@@ -2158,7 +2878,7 @@ class TestAsyncAPI:
         """Multiple arun() calls can run concurrently on different sandboxes."""
         import asyncio
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         async def worker(i):
             config = SandboxConfig(

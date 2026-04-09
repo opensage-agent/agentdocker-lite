@@ -21,18 +21,18 @@ TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
 
 def _requires_helper():
-    """Skip if checkpoint helper is not installed."""
-    from nitrobox.checkpoint import _find_helper
-    try:
-        _find_helper()
-    except FileNotFoundError:
-        pytest.skip("nitrobox-checkpoint-helper not found. Run 'nitrobox setup'.")
+    """Skip if CRIU is not available."""
+    from nitrobox.checkpoint import CheckpointManager
+    if not CheckpointManager.check_available():
+        pytest.skip("CRIU not found. Run 'nitrobox setup'.")
 
 
-def _requires_docker():
-    import subprocess
-    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-        pytest.skip("requires Docker")
+def _requires_gobin():
+    """Skip if nitrobox-core Go binary is not available."""
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        pytest.skip("requires nitrobox-core Go binary")
 
 
 def _requires_criu():
@@ -43,7 +43,7 @@ def _requires_criu():
 @pytest.fixture
 def sandbox(tmp_path, shared_cache_dir):
     _requires_helper()
-    _requires_docker()
+    _requires_gobin()
     _requires_criu()
     config = SandboxConfig(
         image=TEST_IMAGE,
@@ -59,14 +59,12 @@ def sandbox(tmp_path, shared_cache_dir):
     rootfs = box._rootfs
     if rootfs.is_mount():
         import subprocess
-        from nitrobox.checkpoint import _find_helper
         try:
-            helper = _find_helper()
-            for _ in range(10):  # multiple restores stack mounts
+            for _ in range(10):
                 if not rootfs.is_mount():
                     break
                 subprocess.run(
-                    [helper, "umount", str(rootfs)],
+                    ["umount", "-l", str(rootfs)],
                     capture_output=True, timeout=5,
                 )
         except Exception:

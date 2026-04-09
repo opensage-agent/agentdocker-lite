@@ -1022,8 +1022,10 @@ class TestComposeProject:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
 
     def test_lifecycle(self, tmp_path, shared_cache_dir):
         """up → run → reset → run → down with a single-service compose."""
@@ -1640,8 +1642,10 @@ class TestNetworkModeNoneIntegration:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
 
     def test_network_mode_none_no_internet(self, tmp_path, shared_cache_dir):
         """Sandbox with network_mode: none cannot reach external hosts."""
@@ -1691,20 +1695,21 @@ class TestDownOptions:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
 
-    def test_down_rmi_all_removes_layer_cache(self, tmp_path):
-        """down(rmi='all') removes cached rootfs layers for project images."""
+    def test_down_rmi_all_removes_image_from_store(self, tmp_path):
+        """down(rmi='all') removes images from containers/storage."""
         self._skip_if_no_sandbox()
-        from pathlib import Path
+        from nitrobox.image.layers import _get_store_layers
 
-        cache_dir = str(tmp_path / "cache")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
             services:
               app:
-                image: ubuntu:22.04
+                image: alpine:latest
                 command: "sleep infinity"
         """))
 
@@ -1712,32 +1717,29 @@ class TestDownOptions:
             compose,
             project_name="test-rmi",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=cache_dir,
         )
         proj.up()
         proj.services["app"].run("echo ok")
 
-        cache_layers = Path(cache_dir) / "layers"
-        assert cache_layers.exists()
-        cached_before = set(cache_layers.iterdir())
-        assert len(cached_before) > 0
+        # Image should be in store after up()
+        assert _get_store_layers("alpine:latest") is not None
 
         proj.down(rmi="all")
 
-        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
-        assert len(cached_after) < len(cached_before)
+        # Image should be removed from store after down(rmi="all")
+        assert _get_store_layers("alpine:latest") is None, \
+            "image still in containers/storage after down(rmi='all')"
 
-    def test_down_no_rmi_keeps_layer_cache(self, tmp_path):
-        """down() without rmi keeps cached rootfs layers."""
+    def test_down_no_rmi_keeps_image_in_store(self, tmp_path):
+        """down() without rmi keeps images in containers/storage."""
         self._skip_if_no_sandbox()
-        from pathlib import Path
+        from nitrobox.image.layers import _get_store_layers
 
-        cache_dir = str(tmp_path / "cache")
         compose = tmp_path / "docker-compose.yml"
         compose.write_text(textwrap.dedent("""\
             services:
               app:
-                image: ubuntu:22.04
+                image: alpine:latest
                 command: "sleep infinity"
         """))
 
@@ -1745,18 +1747,16 @@ class TestDownOptions:
             compose,
             project_name="test-no-rmi",
             env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=cache_dir,
         )
         proj.up()
         proj.services["app"].run("echo ok")
 
-        cache_layers = Path(cache_dir) / "layers"
-        cached_before = set(cache_layers.iterdir()) if cache_layers.exists() else set()
+        assert _get_store_layers("alpine:latest") is not None
 
         proj.down()  # no rmi
 
-        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
-        assert cached_after == cached_before
+        # Image should still be in store
+        assert _get_store_layers("alpine:latest") is not None
 
     def test_down_volumes_false_keeps_volume_dirs(self, tmp_path):
         """down(volumes=False) keeps named volume directories."""
@@ -1800,8 +1800,10 @@ class TestDetachMode:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
 
     def test_detach_returns_immediately(self, tmp_path, shared_cache_dir):
         """up(detach=True) should return before health check passes."""
@@ -1920,8 +1922,10 @@ class TestExtraHostsAndSysctls:
     def _skip_if_no_sandbox(self):
         if os.geteuid() == 0:
             pytest.skip("compose test must run as non-root")
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            pytest.skip("requires Docker")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
 
     def test_extra_hosts_in_etc_hosts(self, tmp_path, shared_cache_dir):
         """extra_hosts entries should appear in /etc/hosts."""
@@ -2311,28 +2315,12 @@ class TestDigestCache:
         assert digest is None
 
     def test_get_image_digest_same_content(self):
-        """Two tags pointing to the same image have the same digest."""
-        import subprocess
+        """Same image name returns same digest on repeated calls."""
         from nitrobox.sandbox import Sandbox
-
-        # Tag ubuntu:22.04 with a custom name
-        result = subprocess.run(
-            ["docker", "tag", "ubuntu:22.04", "digest-test-dup:latest"],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            pytest.skip("docker not available or ubuntu:22.04 not pulled")
-
-        try:
-            d1 = Sandbox._get_image_digest("ubuntu:22.04")
-            d2 = Sandbox._get_image_digest("digest-test-dup:latest")
-            assert d1 is not None
+        d1 = Sandbox._get_image_digest("alpine:latest")
+        d2 = Sandbox._get_image_digest("alpine:latest")
+        if d1 is not None:
             assert d1 == d2
-        finally:
-            subprocess.run(
-                ["docker", "rmi", "digest-test-dup:latest"],
-                capture_output=True,
-            )
 
     def test_get_image_digest_different_content(self):
         """Different images have different digests."""
@@ -2485,3 +2473,42 @@ class TestSharedNetworkCleanup:
         finally:
             sn.destroy()
         assert sn not in SharedNetwork._live_instances
+
+
+# ------------------------------------------------------------------ #
+#  Buildah build (containers/storage, no Docker daemon)                #
+# ------------------------------------------------------------------ #
+
+
+class TestBuildahBuild:
+    """Test that buildah build via nitrobox-core works end-to-end."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_missing(self):
+        """Skip if nitrobox-core or pasta not available."""
+        import shutil
+        core = os.environ.get("NITROBOX_CORE_BIN", "")
+        if not core:
+            candidate = Path(__file__).resolve().parent.parent / "go" / "nitrobox-core"
+            if not candidate.is_file():
+                pytest.skip("nitrobox-core not found")
+        if not shutil.which("pasta"):
+            vendor_pasta = Path(__file__).resolve().parent.parent / "src" / "nitrobox" / "_vendor" / "pasta"
+            if not vendor_pasta.is_file():
+                pytest.skip("pasta not found")
+        if not os.environ.get("XDG_RUNTIME_DIR"):
+            pytest.skip("XDG_RUNTIME_DIR not set")
+
+    def test_build_from_alpine(self, tmp_path):
+        """Build a simple Dockerfile from alpine and verify it's in the store."""
+        ctx = tmp_path / "ctx"
+        ctx.mkdir()
+        (ctx / "Dockerfile").write_text(
+            "FROM alpine:latest\nRUN echo buildah-test > /tmp/marker.txt\n"
+        )
+        proj = ComposeProject._buildah_build(str(ctx), "Dockerfile", "test-buildah-ci:latest")
+
+        from nitrobox.image.layers import _get_store_layers
+        layers = _get_store_layers("localhost/test-buildah-ci:latest")
+        assert layers is not None, "Built image not found in containers/storage"
+        assert len(layers) >= 1

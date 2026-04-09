@@ -37,9 +37,12 @@ def _skip_if_root():
         pytest.skip("userns test must run as non-root")
 
 
-def _requires_docker():
-    if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-        pytest.skip("requires Docker")
+def _requires_gobin():
+    """Skip if nitrobox-core Go binary is not available."""
+    from nitrobox._gobin import gobin
+    bin_path = gobin()
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        pytest.skip("requires nitrobox-core Go binary")
 
 
 @pytest.fixture(scope="module")
@@ -47,7 +50,7 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
     """Sandbox with /dev/kvm and QEMU installed (module-scoped for speed)."""
     _skip_if_root()
     _skip_if_no_kvm()
-    _requires_docker()
+    _requires_gobin()
 
     tmp = tmp_path_factory.mktemp("vm")
     vm_dir = tmp / "vms"
