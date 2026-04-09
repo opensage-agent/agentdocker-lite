@@ -54,6 +54,35 @@ class SandboxFeatures(TypedDict, total=False):
 
 
 # ====================================================================== #
+#  Cleanup helpers                                                         #
+# ====================================================================== #
+
+
+def _force_rmtree(entry: Path) -> None:
+    """Remove a sandbox directory, handling overlay workdir perms and mapped UIDs.
+
+    1. chmod everything we can (fixes overlay's 000 workdir)
+    2. Try shutil.rmtree
+    3. If that fails, use rmtree_mapped (fork + userns + rm -rf)
+    """
+    # Fix overlay workdir 000 permissions
+    for child in entry.rglob("*"):
+        try:
+            child.chmod(0o700)
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(entry)
+        return
+    except (PermissionError, OSError):
+        pass
+
+    from nitrobox.image.layers import rmtree_mapped
+    rmtree_mapped(entry)
+
+
+# ====================================================================== #
 #  Image defaults                                                          #
 # ====================================================================== #
 
@@ -311,52 +340,40 @@ class Sandbox:
     ) -> subprocess.Popen[Any]:
         """Start an interactive process inside the sandbox with stdio pipes.
 
+        Uses ``nitrobox-core nsenter-exec`` to enter the sandbox's namespace
+        and exec the command. This avoids ``preexec_fn`` which is incompatible
+        with the Go binary (CGO constructor for namespace entry).
+
         Returns a :class:`subprocess.Popen` object with direct
         ``stdin``/``stdout``/``stderr`` pipes for bidirectional communication.
         """
         if isinstance(command, list):
             cmd_args = command
         else:
-            cmd_args = ["bash", "-c", command]
+            cmd_args = ["sh", "-c", command]
 
         shell_pid = self._persistent_shell.pid
 
+        # Use Rust preexec_fn to setns into the sandbox's namespaces.
+        # preexec_fn runs after fork (single-threaded child), so setns
+        # to CLONE_NEWUSER works (requires single-threaded caller).
         if self._userns:
             from nitrobox._core import py_userns_preexec
-
-            _shell_pid = shell_pid
-            _rootfs = str(self._rootfs)
-            _wd = self._config.working_dir or "/"
-
-            def _userns_preexec() -> None:
-                py_userns_preexec(_shell_pid, _rootfs, _wd)
-
-            defaults: dict[str, Any] = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "env": self._cached_env,
-            }
-            defaults.update(kwargs)
-            proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
+            rootfs = str(self._rootfs)
+            workdir = self._config.working_dir or "/"
+            preexec = lambda: py_userns_preexec(shell_pid, rootfs, workdir)
         else:
             from nitrobox._core import py_nsenter_preexec
+            preexec = lambda: py_nsenter_preexec(shell_pid)
 
-            _shell_pid = shell_pid
-
-            def _rootful_preexec() -> None:
-                py_nsenter_preexec(_shell_pid)
-
-            defaults: dict[str, Any] = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "env": self._cached_env,
-            }
-            defaults.update(kwargs)
-            proc = subprocess.Popen(
-                cmd_args, preexec_fn=_rootful_preexec, **defaults
-            )
+        defaults: dict[str, Any] = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "preexec_fn": preexec,
+        }
+        defaults.update(kwargs)
+        proc = subprocess.Popen(cmd_args, **defaults)
 
         logger.debug("popen pid=%d in sandbox: %s", proc.pid, cmd_args)
         return proc
@@ -660,6 +677,7 @@ class Sandbox:
 
         rootfs = getattr(self, "_rootfs", None)
         base_rootfs = getattr(self, "_base_rootfs", None)
+
         if not self._userns and rootfs:
             from nitrobox._core import py_umount
             try:
@@ -808,12 +826,22 @@ class Sandbox:
             if not pid_file.exists():
                 if (entry / "work").exists() or (entry / "upper").exists():
                     logger.info("Cleaning up orphaned sandbox dir %s (no .pid)", entry.name)
-                    for child in entry.rglob("*"):
+                    rootfs_dir = entry / "rootfs"
+                    if rootfs_dir.exists():
+                        from nitrobox._core import py_umount_recursive_lazy
                         try:
-                            child.chmod(0o700)
+                            py_umount_recursive_lazy(str(rootfs_dir))
                         except OSError:
-                            pass
-                    shutil.rmtree(entry, ignore_errors=True)
+                            # Mount was created in a different userns that no longer
+                            # exists — only real root or a reboot can unmount it.
+                            # Skip the dir; rmtree would fail on the mountpoint.
+                            if rootfs_dir.is_mount():
+                                logger.warning(
+                                    "Cannot unmount orphaned %s (stale userns mount, "
+                                    "needs sudo umount -l or reboot)", rootfs_dir,
+                                )
+                                continue
+                    _force_rmtree(entry)
                     cleaned += 1
                 continue
 
@@ -886,12 +914,7 @@ class Sandbox:
                 except OSError as e:
                     logger.debug("cgroup cleanup for %s (non-fatal): %s", entry.name, e)
 
-            for child in entry.rglob("*"):
-                try:
-                    child.chmod(0o700)
-                except OSError:
-                    pass
-            shutil.rmtree(entry, ignore_errors=True)
+            _force_rmtree(entry)
             cleaned += 1
 
         if cleaned:
@@ -995,6 +1018,19 @@ class Sandbox:
 
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(self._persistent_shell.pid))
+
+        # Save UID mapping so cleanup_stale can enter a userns with the
+        # same mapping to delete mapped-UID files after a crash.
+        if self._userns and self._subuid_range:
+            import json
+            uid_map_file = self._env_dir / ".uidmap"
+            outer_uid, sub_start, sub_count = self._subuid_range
+            uid_map_file.write_text(json.dumps({
+                "outer_uid": outer_uid,
+                "outer_gid": os.getgid(),
+                "sub_start": sub_start,
+                "sub_count": sub_count,
+            }))
 
         self.features: SandboxFeatures = {
             "pidfd": self._persistent_shell._pidfd is not None,
@@ -1110,7 +1146,7 @@ class Sandbox:
 
         # --- rootfs -------------------------------------------------------
         rootfs_cache_dir = Path(config.rootfs_cache_dir)
-        from nitrobox.rootfs import _detect_whiteout_strategy
+        from nitrobox.storage.whiteout import _detect_whiteout_strategy
         whiteout_strategy = _detect_whiteout_strategy()
 
         if whiteout_strategy == "none":
@@ -1454,11 +1490,25 @@ class Sandbox:
     def _cleanup_cgroup(self) -> None:
         if not self._cgroup_path or not self._cgroup_path.exists():
             return
+        from nitrobox._core import py_cleanup_cgroup
         try:
-            from nitrobox._core import py_cleanup_cgroup
             py_cleanup_cgroup(str(self._cgroup_path))
-        except OSError as e:
-            logger.debug("cgroup cleanup (non-fatal): %s", e)
+        except OSError:
+            pass
+        # Rust retries for 200ms. If cgroup still exists, schedule a
+        # background retry — don't block teardown.
+        if self._cgroup_path.exists():
+            cg = self._cgroup_path
+            def _deferred_rmdir():
+                for _ in range(20):
+                    if not cg.exists():
+                        return
+                    try:
+                        cg.rmdir()
+                        return
+                    except OSError:
+                        time.sleep(0.1)
+            threading.Thread(target=_deferred_rmdir, daemon=True).start()
 
     # -- rootless cgroup via delegation -------------------------------- #
 
@@ -1675,6 +1725,7 @@ class Sandbox:
         In userns mode the overlayfs is inside the sandbox mount namespace
         (not visible from the host), so we manually search:
         upper_dir → each layer dir (top to bottom) → fallback to upper.
+
         """
         if self._userns:
             assert self._upper_dir is not None

@@ -72,7 +72,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - **Security hardening**: seccomp-bpf, Landlock, masked/readonly paths, capability drop — all on by default
 - **OCI ENTRYPOINT**: Auto-runs image entrypoint scripts (e.g. database init). ComposeProject combines entrypoint+CMD as background process matching Docker semantics
 - **cgroup v2**: CPU, memory, PID, IO limits with PSI pressure monitoring
-- **Docker layer caching**: Shared base layers across images, skip pull when cached
+- **Zero-copy image layers**: Uses containers/storage (same as Podman) for direct layer access — no Docker daemon needed
 - **Docker Compose compatibility**: Parse `docker-compose.yml`, per-network isolation via shared namespaces, Docker-matching health check daemon (`interval`, `start_period`, `start_interval`, `retries`)
 - **CLI**: `nitrobox ps/kill/cleanup` for sandbox management
 
@@ -104,18 +104,12 @@ pip install nitrobox
 
 ### Development build
 
-Requires [Rust](https://rustup.rs/) and [maturin](https://www.maturin.rs/):
+Requires [Rust](https://rustup.rs/), [Go 1.25+](https://go.dev/), and [maturin](https://www.maturin.rs/):
 
 ```bash
 pip install maturin
-maturin develop --release        # build Rust core + install in-place
-pytest tests/                    # run tests
-```
-
-To regenerate type stubs after changing Rust bindings:
-
-```bash
-cargo run --bin stub_gen --release
+make dev    # builds Rust _core + Go nitrobox-core in one step
+make test   # run tests
 ```
 
 ## Quick start
@@ -280,6 +274,8 @@ output, _ = sb.run("cat /workspace/data.txt")
 
 ## Performance
 
+### Micro-benchmark (single sandbox)
+
 | | Docker | nitrobox | Speedup |
 |---|---|---|---|
 | Create | 320ms | 25ms | **13x** |
@@ -290,7 +286,16 @@ output, _ = sb.run("cat /workspace/data.txt")
 | Reset loop | 2.0/s | 62.8/s | **31x** |
 | 16x concurrent | 32 cmd/s | 655 cmd/s | **20x** |
 
-Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start.md](docs/quick_start.md#performance) | Reproduce: `python examples/benchmark.py`
+### End-to-end: Terminal-Bench 2.0 (88 tasks, c=16, oracle agent)
+
+| | Docker | nitrobox | Speedup |
+|---|---|---|---|
+| **Wall time** | 2094s (35 min) | 913s (15 min) | **2.29x** |
+| Pass rate | 83/88 | 84/88 | +1 |
+| Errors | 1 | 0 | — |
+| Teardown (mean) | 25.5s | 1.1s | **23x** |
+
+Full benchmark: [dev/support/tb2.md](dev/support/tb2.md) | Reproduce: `python examples/bench_harbor_e2e.py`
 
 ## Docker migration cheatsheet
 
@@ -307,26 +312,24 @@ See [docs/quick_start.md](docs/quick_start.md) for full parameter mapping, compo
 ## Architecture
 
 ```
-Host kernel (shared)
-  |
-  +-- Sandbox "worker-0"
-  |     +-- User namespace (rootless) or real root
-  |     +-- PID namespace (unshare --pid)
-  |     +-- Mount namespace (unshare --mount)
-  |     +-- UTS namespace (custom hostname)
-  |     +-- IPC namespace
-  |     +-- Network namespace (optional, with pasta NAT)
-  |     +-- Time namespace (for CRIU clock continuity)
-  |     +-- chroot into overlayfs rootfs
-  |     |     +-- lowerdir: shared base layers (read-only, cached)
-  |     |     +-- upperdir: per-sandbox changes (cleared on reset)
-  |     +-- Persistent bash process (stdin/stdout pipes + signal fd)
-  |     +-- seccomp-bpf + Landlock + capability drop
-  |     +-- cgroup v2 limits + PSI monitoring
-  |
-  +-- Sandbox "worker-1"
-  |     +-- (same structure, independent namespaces)
-  ...
+Python API (Sandbox, ComposeProject)
+  ├── Rust _core (pyo3)         — runtime: spawn, mount, cgroup, security, pidfd
+  └── Go nitrobox-core (binary) — images: pull, build, delete (containers/storage + buildah)
+
+Image pull order:
+  1. containers/storage local cache  → zero-copy (instant)
+  2. Docker daemon local             → docker-daemon: transport (fast, no network)
+  3. Registry remote                 → docker:// transport (network pull)
+
+Sandbox "worker-0"
+  +-- User namespace (rootless) or real root
+  +-- PID / Mount / UTS / IPC / Net / Time namespaces
+  +-- overlayfs rootfs
+  |     +-- lowerdir: image layers from containers/storage (zero-copy, read-only)
+  |     +-- upperdir: per-sandbox changes (cleared on reset)
+  +-- Persistent shell (stdin/stdout pipes + signal fd for exit code)
+  +-- seccomp-bpf + Landlock + capability drop
+  +-- cgroup v2 limits + PSI monitoring
 ```
 
 ## Examples
