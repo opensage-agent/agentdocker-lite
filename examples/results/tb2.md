@@ -37,6 +37,15 @@
 - Docker: **82 pass, 5 fail, 2 errors**
 - Same pass count; nitrobox has 0 infra errors
 
+## Trajectories
+
+- Cold start:
+  - Docker: `/scratch/yuzhou/projects/harbor/jobs/bench_docker_c16_20260408_234744/`
+  - nitrobox: `/scratch/yuzhou/projects/harbor/jobs/bench_nitrobox_c16_20260408_234744/`
+- Hot start:
+  - Docker: `/scratch/yuzhou/projects/harbor/jobs/bench_docker_c16_20260409_003757/`
+  - nitrobox: `/scratch/yuzhou/projects/harbor/jobs/bench_nitrobox_c16_20260409_003757/`
+
 ## Reproduce
 
 ```bash

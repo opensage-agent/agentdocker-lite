@@ -46,6 +46,11 @@ These 5 tasks fail on both Docker and nitrobox — upstream SWEBench issues:
 Docker had 3 additional failures + 1 timeout likely due to resource
 pressure from the Docker daemon at concurrency 20.
 
+## Trajectories
+
+- nitrobox: `/scratch/yuzhou/projects/harbor/jobs/swebench_nitrobox/`
+- Docker: `/scratch/yuzhou/projects/harbor/jobs/swebench_docker/`
+
 ## Reproduce
 
 ```bash
