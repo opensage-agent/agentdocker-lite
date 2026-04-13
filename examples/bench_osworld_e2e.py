@@ -115,9 +115,20 @@ _TIMING_WRAPPER = '''\
 import sys, os, json, time
 sys.path.insert(0, os.getcwd())
 
+# Patch DesktopEnv to record __init__ boot time
+import desktop_env.desktop_env as _de
+_orig_init = _de.DesktopEnv.__init__
+def _patched_init(self, *a, **kw):
+    self._init_start = time.monotonic()
+    _orig_init(self, *a, **kw)
+    self._init_end = time.monotonic()
+_de.DesktopEnv.__init__ = _patched_init
+
 import lib_run_single as _lrs
 _orig_run = _lrs.run_single_example
 def _timed_run(agent, env, example, max_steps, instruction, args, example_result_dir, scores):
+    # Include __init__ boot time in env_setup if this is the first task
+    t_init = getattr(env, '_init_end', 0) - getattr(env, '_init_start', 0)
     t0 = time.monotonic()
     env.reset(task_config=example)
     try:
@@ -125,6 +136,12 @@ def _timed_run(agent, env, example, max_steps, instruction, args, example_result
     except Exception:
         agent.reset(vm_ip=env.vm_ip)
     t_setup = time.monotonic()
+    # Add __init__ time only for the first task (subsequent tasks pay revert cost in reset)
+    if t_init > 0:
+        t_init_cost = t_init
+        env._init_start = env._init_end = 0  # only count once
+    else:
+        t_init_cost = 0
     import datetime as _dt
     _lrs.time.sleep(60)
     obs = env._get_obs()
@@ -160,7 +177,8 @@ def _timed_run(agent, env, example, max_steps, instruction, args, example_result
     env.controller.end_recording(os.path.join(example_result_dir, "recording.mp4"))
     t_teardown = time.monotonic()
     with open(os.path.join(example_result_dir, "timing.json"), "w") as f:
-        json.dump({"environment_setup": t_setup - t0, "agent_execution": t_agent - t_setup,
+        json.dump({"environment_setup": (t_setup - t0) + t_init_cost,
+                   "agent_execution": t_agent - t_setup,
                    "verifier": t_verify - t_agent, "teardown": t_teardown - t_verify,
                    "llm_inference": llm_total, "n_steps": step_idx}, f)
 _lrs.run_single_example = _timed_run
