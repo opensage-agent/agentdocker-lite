@@ -245,6 +245,14 @@ pub fn build_seccomp_bpf() -> Vec<u8> {
 }
 
 /// Apply seccomp-bpf filter. Uses rustix for `NO_NEW_PRIVS`, libc for the filter install.
+///
+/// Uses the `seccomp(2)` syscall with `SECCOMP_FILTER_FLAG_SPEC_ALLOW` so the kernel
+/// does NOT force-enable SSBD/STIBP on sandboxed processes. Without this flag, kernels
+/// booted with `spec_store_bypass_disable=seccomp` (the Ubuntu/Debian default) will
+/// force-enable SSBD the moment a seccomp filter is installed. SSBD serializes the
+/// store-bypass predictor and costs ~40-60% throughput on CPU-bound workloads
+/// (observed as ~2x slowdown on Python/interpreter inside nested QEMU VMs).
+/// Matches runc's behavior (see moby/moby issue #41389, runc #3390/#3588).
 pub fn apply_seccomp_filter() -> io::Result<()> {
     let bpf_bytes = build_seccomp_bpf();
     let n_insns = bpf_bytes.len() / std::mem::size_of::<libc::sock_filter>();
@@ -257,22 +265,46 @@ pub fn apply_seccomp_filter() -> io::Result<()> {
     // NO_NEW_PRIVS via rustix (type-safe)
     rustix::thread::set_no_new_privs(true)?;
 
-    // Install BPF filter via libc (rustix doesn't support SECCOMP_MODE_FILTER with a program)
+    // Install BPF filter via seccomp(2) syscall (NOT prctl) so we can pass
+    // SECCOMP_FILTER_FLAG_SPEC_ALLOW and avoid the implicit SSBD/STIBP cost.
+    // Constants from <linux/seccomp.h>:
+    //   SECCOMP_SET_MODE_FILTER   = 1
+    //   SECCOMP_FILTER_FLAG_SPEC_ALLOW = 4
+    const SECCOMP_SET_MODE_FILTER: libc::c_ulong = 1;
+    const SECCOMP_FILTER_FLAG_SPEC_ALLOW: libc::c_ulong = 4;
+
     let ret = unsafe {
-        libc::prctl(
-            libc::PR_SET_SECCOMP,
-            libc::c_ulong::from(libc::SECCOMP_MODE_FILTER),
+        libc::syscall(
+            libc::SYS_seccomp,
+            SECCOMP_SET_MODE_FILTER,
+            SECCOMP_FILTER_FLAG_SPEC_ALLOW,
             &raw const prog as libc::c_ulong,
-            0,
-            0,
         )
     };
     if ret != 0 {
-        return Err(io::Error::last_os_error());
+        // Fall back to the old prctl path if the kernel rejects SPEC_ALLOW
+        // (very old kernels < 4.17 don't know the flag).
+        let errno = io::Error::last_os_error();
+        log::warn!(
+            "seccomp() with SPEC_ALLOW failed ({errno}); falling back to prctl \
+             (SSBD will be force-enabled — expect ~15% perf loss)"
+        );
+        let ret2 = unsafe {
+            libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::c_ulong::from(libc::SECCOMP_MODE_FILTER),
+                &raw const prog as libc::c_ulong,
+                0,
+                0,
+            )
+        };
+        if ret2 != 0 {
+            return Err(io::Error::last_os_error());
+        }
     }
 
     log::debug!(
-        "seccomp: blocked {} syscalls + clone NS flags + ioctl TIOCSTI",
+        "seccomp: blocked {} syscalls + clone NS flags + ioctl TIOCSTI (SPEC_ALLOW)",
         ARCH.blocked.len()
     );
     Ok(())
