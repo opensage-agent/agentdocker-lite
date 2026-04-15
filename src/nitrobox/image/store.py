@@ -247,6 +247,21 @@ def get_image_config(image_name: str) -> dict | None:
     if cached is not None:
         return cached
 
+    # 1.5. BuildKit config cache — from recent builds
+    from nitrobox.image.buildkit import get_buildkit_config
+    bk_cfg = get_buildkit_config(image_name)
+    if bk_cfg is not None:
+        oci = bk_cfg.get("config", {})
+        result: ImageConfig = {
+            "cmd": oci.get("Cmd"),
+            "entrypoint": oci.get("Entrypoint"),
+            "env": _parse_docker_env(oci.get("Env")),
+            "working_dir": oci.get("WorkingDir") or "/",
+            "exposed_ports": list((oci.get("ExposedPorts") or {}).keys()),
+        }
+        _image_store_populate(image_name, result)
+        return result
+
     # 2. containers/storage — primary source for pulled and buildah-built images
     store_cfg = _read_config_from_containers_storage(image_name)
     if store_cfg is not None:

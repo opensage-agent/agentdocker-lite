@@ -460,14 +460,8 @@ class ComposeProject:
     def _resolve_image_map(self) -> dict[str, str]:
         """Resolve image names and build missing images.
 
-        Mirrors Docker Compose's ``ensureImagesExists`` logic:
-
-        - Resolve image names from our own compose parser (no
-          ``docker compose config`` subprocess).
-        - For ``build:`` services: ``{project_name}-{service_name}``
-          (same convention as Docker Compose).
-        - Check if image exists via Docker Engine API (~5ms).
-        - Build missing images via Docker Engine API ``POST /build``.
+        Uses BuildKit when available (fast concurrent cache), falls back
+        to buildah.
         """
         from nitrobox.docker_api import get_client
 
@@ -482,24 +476,40 @@ class ComposeProject:
                 mapping[name] = f"{project}-{name}"
 
         # Build missing images for services with build: section.
-        # Uses buildah (via nitrobox-core image-build) to build directly
-        # into containers/storage — no Docker daemon needed.
         from nitrobox.image.layers import _get_store_layers
+        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
+
+        # Try BuildKit first (fast concurrent builds with in-memory cache)
+        use_buildkit = False
+        try:
+            bk = BuildKitManager.get()
+            if bk.available:
+                use_buildkit = True
+        except Exception:
+            pass
+
         for name, svc in self._defs.items():
             if not svc.build or name not in mapping:
                 continue
 
             image_name = mapping[name]
-            # Skip if already in containers/storage
+
+            # Skip if already available (containers/storage or BuildKit cache)
             if _get_store_layers(image_name) is not None:
+                continue
+            if get_buildkit_layers(image_name) is not None:
                 continue
 
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}
             context = str(build_cfg.get("context", "."))
             dockerfile = build_cfg.get("dockerfile", "Dockerfile")
 
-            logger.info("Building image for service %s: %s (buildah)", name, image_name)
-            self._buildah_build(context, dockerfile, image_name)
+            if use_buildkit:
+                logger.info("Building image for service %s: %s (buildkit)", name, image_name)
+                bk.build(context, dockerfile, image_name)
+            else:
+                logger.info("Building image for service %s: %s (buildah)", name, image_name)
+                self._buildah_build(context, dockerfile, image_name)
 
         return mapping
 

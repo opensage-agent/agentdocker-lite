@@ -208,6 +208,15 @@ def prepare_rootfs_layers_from_docker(
     Returns:
         Ordered list of layer directories (bottom to top).
     """
+    # 0. Check BuildKit layer cache (from recent builds)
+    from nitrobox.image.buildkit import get_buildkit_layers
+    bk_layers = get_buildkit_layers(image_name)
+    if bk_layers is not None:
+        paths = [Path(p) for p in bk_layers]
+        logger.info("Layer cache ready for %s: %d layers (buildkit)",
+                     image_name, len(paths))
+        return paths
+
     # 1. Check containers/storage (zero-copy, user-owned)
     layers = _get_store_layers(image_name)
     if layers is not None:
