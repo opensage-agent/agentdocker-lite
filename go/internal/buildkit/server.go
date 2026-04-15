@@ -16,8 +16,12 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/diff/apply"
+	"github.com/containerd/containerd/v2/core/images"
 	ctdmetadata "github.com/containerd/containerd/v2/core/metadata"
 	ctdsnapshots "github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	digest "github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/containerd/v2/plugins/diff/walking"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay"
@@ -59,10 +63,11 @@ type Server struct {
 	grpcServer  *grpc.Server
 	listener    net.Listener
 	socketPath  string
-	snapshotter   snapshot.Snapshotter   // BuildKit-wrapped snapshotter
-	metaDB        *ctdmetadata.DB       // containerd metadata DB
-	cacheManager  cache.Manager         // BuildKit cache manager
-	metadataStore *metadata.Store       // BuildKit metadata store (chain ID index)
+	snapshotter   snapshot.Snapshotter    // BuildKit-wrapped snapshotter
+	metaDB        *ctdmetadata.DB        // containerd metadata DB
+	imageStore    images.Store           // containerd image store (for rmi)
+	cacheManager  cache.Manager          // BuildKit cache manager
+	metadataStore *metadata.Store        // BuildKit metadata store (chain ID index)
 
 	mu       sync.Mutex
 	started  bool
@@ -181,6 +186,7 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("init metadata db: %w", err)
 	}
 	s.metaDB = mdb
+	s.imageStore = ctdmetadata.NewImageStore(mdb)
 	log("metadata DB OK")
 
 	// BuildKit-namespaced wrappers
@@ -342,6 +348,56 @@ func (s *Server) SocketPath() string { return s.socketPath }
 // RootDir returns the BuildKit root directory.
 func (s *Server) RootDir() string { return s.rootDir }
 
+// nsCtx returns a context with the "nitrobox" namespace for image store operations.
+func (s *Server) nsCtx(ctx context.Context) context.Context {
+	return namespaces.WithNamespace(ctx, "nitrobox")
+}
+
+// RegisterImage stores an image reference in the containerd image store.
+func (s *Server) RegisterImage(ctx context.Context, name, manifestDigest string) error {
+	if s.imageStore == nil {
+		return fmt.Errorf("image store not initialized")
+	}
+	_, err := s.imageStore.Create(s.nsCtx(ctx), images.Image{
+		Name: name,
+		Target: ocispec.Descriptor{
+			MediaType: "application/vnd.oci.image.manifest.v1+json",
+			Digest:    digestFromString(manifestDigest),
+		},
+	})
+	if err != nil {
+		// Update if already exists
+		_, err = s.imageStore.Update(s.nsCtx(ctx), images.Image{
+			Name: name,
+			Target: ocispec.Descriptor{
+				MediaType: "application/vnd.oci.image.manifest.v1+json",
+				Digest:    digestFromString(manifestDigest),
+			},
+		})
+	}
+	return err
+}
+
+// CheckImage returns the manifest digest if the image is registered, or empty string.
+func (s *Server) CheckImage(ctx context.Context, name string) string {
+	if s.imageStore == nil {
+		return ""
+	}
+	img, err := s.imageStore.Get(s.nsCtx(ctx), name)
+	if err != nil {
+		return ""
+	}
+	return img.Target.Digest.String()
+}
+
+// DeleteImage removes an image from the containerd image store (rmi).
+func (s *Server) DeleteImage(ctx context.Context, name string) error {
+	if s.imageStore == nil {
+		return fmt.Errorf("image store not initialized")
+	}
+	return s.imageStore.Delete(s.nsCtx(ctx), name)
+}
+
 // GetLayerPaths resolves a manifest digest to overlay layer directory paths.
 // Uses BuildKit's cache manager to find the snapshot ref by chain ID,
 // then calls ref.Mount() to get the actual overlay mount paths.
@@ -426,4 +482,8 @@ func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]st
 		return nil, fmt.Errorf("no layer paths from mounts")
 	}
 	return paths, nil
+}
+
+func digestFromString(s string) digest.Digest {
+	return digest.Digest(s)
 }

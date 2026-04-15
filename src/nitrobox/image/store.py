@@ -155,20 +155,25 @@ def get_image_config(image_name: str) -> dict | None:
     if cached is not None:
         return cached
 
-    # 1.5. BuildKit config cache — from recent builds
-    from nitrobox.image.buildkit import get_buildkit_config
-    bk_cfg = get_buildkit_config(image_name)
-    if bk_cfg is not None:
-        oci = bk_cfg.get("config", {})
-        result: ImageConfig = {
-            "cmd": oci.get("Cmd"),
-            "entrypoint": oci.get("Entrypoint"),
-            "env": _parse_docker_env(oci.get("Env")),
-            "working_dir": oci.get("WorkingDir") or "/",
-            "exposed_ports": list((oci.get("ExposedPorts") or {}).keys()),
-        }
-        _image_store_populate(image_name, result)
-        return result
+    # 1.5. BuildKit image store — check if image is registered and read config
+    try:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        cached = bk.check(image_name)
+        if cached and cached.get("manifest_digest"):
+            oci_cfg = bk.read_image_config(cached["manifest_digest"])
+            oci = oci_cfg.get("config", {})
+            result: ImageConfig = {
+                "cmd": oci.get("Cmd"),
+                "entrypoint": oci.get("Entrypoint"),
+                "env": _parse_docker_env(oci.get("Env")),
+                "working_dir": oci.get("WorkingDir") or "/",
+                "exposed_ports": list((oci.get("ExposedPorts") or {}).keys()),
+            }
+            _image_store_populate(image_name, result)
+            return result
+    except Exception:
+        pass
 
     # 2. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
     disk_cfg = _read_config_from_manifest_cache(image_name)

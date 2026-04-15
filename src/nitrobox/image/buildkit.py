@@ -3,6 +3,8 @@
 Manages an embedded buildkitd subprocess (via rootlesskit userns)
 and communicates via a JSON-over-Unix-socket handler. All build,
 pull, and layer resolution happens in-process on the server side.
+
+Image registry uses containerd's image store (same DB as BuildKit).
 """
 
 from __future__ import annotations
@@ -21,21 +23,6 @@ logger = logging.getLogger(__name__)
 
 _manager: BuildKitManager | None = None
 _lock = threading.Lock()
-
-# Cache: image_name → list of layer fs/ paths
-_buildkit_layer_cache: dict[str, list[str]] = {}
-# Cache: image_name → OCI config dict
-_buildkit_config_cache: dict[str, dict] = {}
-
-
-def get_buildkit_layers(image_name: str) -> list[str] | None:
-    """Look up cached BuildKit layer paths for an image."""
-    return _buildkit_layer_cache.get(image_name)
-
-
-def get_buildkit_config(image_name: str) -> dict | None:
-    """Look up cached OCI config for a BuildKit-built image."""
-    return _buildkit_config_cache.get(image_name)
 
 
 class BuildKitManager:
@@ -57,7 +44,6 @@ class BuildKitManager:
         return _manager
 
     def _gobin(self) -> str:
-        """Find nitrobox-core binary."""
         from nitrobox._gobin import gobin
         return gobin()
 
@@ -66,7 +52,7 @@ class BuildKitManager:
         if self._handler_path and self._is_socket_alive():
             return self._handler_path
 
-        # Check if server is already running (from a previous Python session)
+        # Check if server is already running (from a previous session)
         server_json = Path(self._root_dir) / "server.json"
         if server_json.exists():
             try:
@@ -93,30 +79,22 @@ class BuildKitManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        # Send config via stdin (consumed by CLI before rootlesskit re-exec)
         self._server_proc.stdin.write(req + b"\n")
         self._server_proc.stdin.flush()
-        # Don't close stdin — keep pipe open so server stays alive
 
-        # Wait for ready
         for _ in range(60):
             if ready_path.exists():
                 break
             time.sleep(0.5)
         else:
-            raise RuntimeError(
-                "buildkitd failed to start within 30s. "
-                "Check server logs at " + self._root_dir
-            )
+            raise RuntimeError("buildkitd failed to start within 30s")
 
-        # Read server info
         info = json.loads(server_json.read_text())
         self._handler_path = info["handler_path"]
         logger.info("Embedded buildkitd started at %s", self._handler_path)
         return self._handler_path
 
     def _is_socket_alive(self) -> bool:
-        """Check if the handler socket is connectable."""
         if not self._handler_path or not os.path.exists(self._handler_path):
             return False
         try:
@@ -129,7 +107,7 @@ class BuildKitManager:
             return False
 
     def _send_request(self, req: dict, timeout: int = 600) -> dict:
-        """Send a JSON request to the handler socket and return response."""
+        """Send a JSON request to the handler socket."""
         handler = self.ensure_running()
         docker_config = str(Path.home() / ".docker")
         req["docker_config"] = docker_config
@@ -156,39 +134,45 @@ class BuildKitManager:
             raise RuntimeError(result["error"])
         return result
 
-    def build(self, context: str, dockerfile: str, tag: str) -> dict:
-        """Build a Dockerfile via embedded BuildKit.
+    def check(self, image: str) -> dict | None:
+        """Check if an image is registered. Returns layer paths or None."""
+        try:
+            result = self._send_request({
+                "action": "check",
+                "image_ref": image,
+            }, timeout=10)
+            if result.get("ok") and result.get("layer_paths"):
+                return result
+            return None
+        except Exception:
+            return None
 
-        Returns dict with keys: manifest_digest, layer_paths.
-        """
-        result = self._send_request({
+    def build(self, context: str, dockerfile: str, tag: str) -> dict:
+        """Build a Dockerfile via embedded BuildKit."""
+        return self._send_request({
             "action": "build",
             "dockerfile": dockerfile,
             "context": context,
             "tag": tag,
         })
 
-        # Cache results
-        if result.get("layer_paths"):
-            _buildkit_layer_cache[tag] = result["layer_paths"]
-        if result.get("manifest_digest"):
-            self._cache_config(tag, result["manifest_digest"])
-
-        return result
-
     def pull(self, image: str) -> dict:
-        """Pull a pre-built image via BuildKit."""
-        result = self._send_request({
+        """Pull a pre-built image via BuildKit (always checks registry)."""
+        return self._send_request({
             "action": "pull",
             "image_ref": image,
+            "no_cache": True,
         })
 
-        if result.get("layer_paths"):
-            _buildkit_layer_cache[image] = result["layer_paths"]
-        if result.get("manifest_digest"):
-            self._cache_config(image, result["manifest_digest"])
-
-        return result
+    def delete_image(self, image: str):
+        """Delete an image from the store (rmi)."""
+        try:
+            self._send_request({
+                "action": "delete",
+                "image_ref": image,
+            }, timeout=10)
+        except Exception:
+            pass
 
     def read_image_config(self, manifest_digest: str) -> dict:
         """Read OCI image config via handler."""
@@ -197,16 +181,9 @@ class BuildKitManager:
             "digest": manifest_digest,
         }, timeout=10)
         if result.get("config"):
-            return json.loads(result["config"]) if isinstance(result["config"], str) else result["config"]
+            cfg = result["config"]
+            return json.loads(cfg) if isinstance(cfg, str) else cfg
         return {}
-
-    def _cache_config(self, tag: str, manifest_digest: str):
-        """Cache OCI config for an image tag."""
-        try:
-            cfg = self.read_image_config(manifest_digest)
-            _buildkit_config_cache[tag] = cfg
-        except Exception:
-            pass
 
     def stop(self):
         """Stop the embedded buildkitd."""
@@ -218,7 +195,6 @@ class BuildKitManager:
                 self._server_proc.kill()
             self._server_proc = None
 
-        # Also try killing by PID from rootlesskit state
         rk_pid = Path(self._root_dir) / "rootlesskit" / "child_pid"
         if rk_pid.exists():
             try:
@@ -231,7 +207,6 @@ class BuildKitManager:
 
     @property
     def available(self) -> bool:
-        """Check if BuildKit backend is available (nitrobox-core exists)."""
         try:
             self._gobin()
             return True

@@ -369,9 +369,16 @@ class ComposeProject:
             shutil.rmtree(self._volume_dir, ignore_errors=True)
             self._volume_dir = None
 
-        # Image cleanup: BuildKit manages its own cache via GC.
-        # No explicit image deletion needed (layers are shared and
-        # reference-counted by the cache manager).
+        # Delete images from containerd image store (matches Docker --rmi).
+        # Build cache (solver cache) is NOT affected — rebuilds stay fast.
+        if rmi is not None:
+            from nitrobox.image.buildkit import BuildKitManager
+            try:
+                bk = BuildKitManager.get()
+                for image in self._image_map.values():
+                    bk.delete_image(image)
+            except Exception:
+                pass
 
         # Drop from the atexit registry so interpreter shutdown doesn't
         # try to double-teardown an already-cleaned project.
@@ -431,7 +438,7 @@ class ComposeProject:
                 mapping[name] = f"{project}-{name}"
 
         # Build missing images for services with build: section.
-        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
+        from nitrobox.image.buildkit import BuildKitManager
 
         bk = BuildKitManager.get()
 
@@ -441,8 +448,8 @@ class ComposeProject:
 
             image_name = mapping[name]
 
-            # Skip if already in BuildKit cache
-            if get_buildkit_layers(image_name) is not None:
+            # Skip if already registered in image store
+            if bk.check(image_name) is not None:
                 continue
 
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}

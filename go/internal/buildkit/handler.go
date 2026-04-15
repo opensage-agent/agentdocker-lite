@@ -34,6 +34,7 @@ type Request struct {
 	ImageRef     string `json:"image_ref"`     // for pull
 	Digest       string `json:"digest"`        // for config
 	DockerConfig string `json:"docker_config"` // path to Docker config dir (for auth)
+	NoCache      bool   `json:"no_cache"`      // skip solver cache (force re-pull)
 }
 
 // Response to Python.
@@ -101,6 +102,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		resp = s.doPull(req)
 	case "config":
 		resp = s.doConfig(req)
+	case "check":
+		resp = s.doCheck(req)
+	case "delete":
+		resp = s.doDelete(req)
 	default:
 		resp = Response{Error: fmt.Sprintf("unknown action: %s", req.Action)}
 	}
@@ -187,6 +192,9 @@ func (s *Server) doBuild(req Request) Response {
 		}
 	}
 
+	// Register in image store
+	s.RegisterImage(ctx, req.Tag, manifestDigest)
+
 	return Response{
 		OK:             true,
 		ManifestDigest: manifestDigest,
@@ -217,9 +225,14 @@ func (s *Server) doPull(req Request) Response {
 	dockerfilePath := filepath.Join(tmpDir, "Dockerfile")
 	os.WriteFile(dockerfilePath, []byte(fmt.Sprintf("FROM %s\nRUN true\n", req.ImageRef)), 0644)
 
+	frontendAttrs := map[string]string{"filename": "Dockerfile"}
+	if req.NoCache {
+		frontendAttrs["no-cache"] = ""
+	}
+
 	solveOpt := client.SolveOpt{
 		Frontend:      "dockerfile.v0",
-		FrontendAttrs: map[string]string{"filename": "Dockerfile"},
+		FrontendAttrs: frontendAttrs,
 		LocalDirs: map[string]string{
 			"context":    tmpDir,
 			"dockerfile": tmpDir,
@@ -264,6 +277,9 @@ func (s *Server) doPull(req Request) Response {
 		}
 	}
 
+	// Register in image store
+	s.RegisterImage(ctx, req.ImageRef, manifestDigest)
+
 	return Response{
 		OK:             true,
 		ManifestDigest: manifestDigest,
@@ -290,6 +306,41 @@ func (s *Server) doConfig(req Request) Response {
 		OK:     true,
 		Config: cfgJSON,
 	}
+}
+
+func (s *Server) doCheck(req Request) Response {
+	name := req.ImageRef
+	if name == "" {
+		name = req.Tag
+	}
+	digest := s.CheckImage(context.Background(), name)
+	if digest == "" {
+		return Response{OK: false}
+	}
+	// Image registered — resolve layer paths
+	paths, err := s.GetLayerPaths(context.Background(), digest)
+	if err != nil {
+		// Image registered but layers gone (GC'd) — delete stale entry
+		s.DeleteImage(context.Background(), name)
+		return Response{OK: false}
+	}
+	return Response{
+		OK:             true,
+		ManifestDigest: digest,
+		LayerPaths:     paths,
+	}
+}
+
+func (s *Server) doDelete(req Request) Response {
+	name := req.ImageRef
+	if name == "" {
+		name = req.Tag
+	}
+	err := s.DeleteImage(context.Background(), name)
+	if err != nil {
+		return Response{Error: fmt.Sprintf("delete %s: %v", name, err)}
+	}
+	return Response{OK: true}
 }
 
 func formatBuildError(tag string, err error) string {

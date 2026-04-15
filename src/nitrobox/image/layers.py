@@ -41,24 +41,23 @@ def prepare_rootfs_layers_from_docker(
     Returns:
         Ordered list of layer directories (bottom to top).
     """
-    from nitrobox.image.buildkit import get_buildkit_layers, BuildKitManager
+    from nitrobox.image.buildkit import BuildKitManager
+    bk = BuildKitManager.get()
 
-    # 1. Check BuildKit layer cache (from recent builds/pulls)
-    bk_layers = get_buildkit_layers(image_name)
-    if bk_layers is not None:
-        paths = [Path(p) for p in bk_layers]
+    # 1. Check containerd image store (persistent, survives restarts)
+    cached = bk.check(image_name)
+    if cached and cached.get("layer_paths"):
+        paths = [Path(p) for p in cached["layer_paths"]]
         logger.info("Layer cache ready for %s: %d layers (buildkit)",
                      image_name, len(paths))
         return paths
 
-    # 2. Pull via BuildKit
+    # 2. Pull from registry via BuildKit (no-cache → always checks registry)
     if pull:
-        bk = BuildKitManager.get()
         logger.info("Pulling %s via BuildKit", image_name)
-        bk.pull(image_name)
-        bk_layers = get_buildkit_layers(image_name)
-        if bk_layers is not None:
-            paths = [Path(p) for p in bk_layers]
+        result = bk.pull(image_name)
+        if result.get("layer_paths"):
+            paths = [Path(p) for p in result["layer_paths"]]
             logger.info("Layer cache ready for %s: %d layers (buildkit pull)",
                          image_name, len(paths))
             return paths
