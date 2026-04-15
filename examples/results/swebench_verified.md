@@ -54,23 +54,20 @@ pressure from the Docker daemon at concurrency 20.
 ## Reproduce
 
 ```bash
-# 1. Generate SWEBench Verified tasks (requires swebench package)
 cd /path/to/harbor
-uv run --with swebench python adapters/swebench/run_adapter.py \
-    --all --task-dir datasets/swebench
 
-# 2. Run with nitrobox (concurrency 20)
+# Run with nitrobox (concurrency 20)
 uv run harbor run \
-    -p datasets/swebench \
+    -d swebench-verified \
     -e nitrobox \
     -a oracle \
     -n 20 \
     --job-name swebench_nitrobox \
     --force-build --delete --yes
 
-# 3. Run with Docker (concurrency 20)
+# Run with Docker (concurrency 20)
 uv run harbor run \
-    -p datasets/swebench \
+    -d swebench-verified \
     -e docker \
     -a oracle \
     -n 20 \
@@ -83,8 +80,11 @@ Or via bench_harbor_e2e.py:
 ```bash
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
-    -p datasets/swebench \
+    --dataset swebench-verified \
     --agent oracle \
     --concurrency 20 \
     --envs docker,nitrobox
 ```
+
+`swebench-verified` is a registered dataset on the Harbor registry; the
+first run auto-downloads its 500 tasks into `~/.cache/harbor/tasks/`.
