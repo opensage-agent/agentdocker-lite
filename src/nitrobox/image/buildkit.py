@@ -143,8 +143,19 @@ class BuildKitManager:
             input=req, capture_output=True, env=env, timeout=600,
         )
         if result.returncode != 0:
+            stderr = result.stderr.decode()
+            if "invalid argument" in stderr and ("subuid" in stderr or "subgid" in stderr or "Lchown" in stderr):
+                raise RuntimeError(
+                    f"BuildKit build failed for {tag}: UID/GID mapping range too small.\n"
+                    f"The image contains files with UIDs that exceed your "
+                    f"/etc/subuid range.\n"
+                    f"Fix: sudo sed -i 's/{os.getlogin()}:[0-9]*:[0-9]*/"
+                    f"{os.getlogin()}:100000:1000000/' /etc/subuid /etc/subgid\n"
+                    f"Then restart buildkitd: nitrobox buildkit-stop\n\n"
+                    f"Original error: {stderr[-500:]}"
+                )
             raise RuntimeError(
-                f"BuildKit build failed for {tag}: {result.stderr.decode()[:500]}"
+                f"BuildKit build failed for {tag}: {stderr[-1000:]}"
             )
 
         resp = json.loads(result.stdout)
