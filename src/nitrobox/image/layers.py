@@ -209,8 +209,8 @@ def prepare_rootfs_layers_from_docker(
     Returns:
         Ordered list of layer directories (bottom to top).
     """
-    # 0. Check BuildKit layer cache (from recent builds)
-    from nitrobox.image.buildkit import get_buildkit_layers
+    # 1. Check BuildKit layer cache (from recent builds/pulls)
+    from nitrobox.image.buildkit import get_buildkit_layers, BuildKitManager
     bk_layers = get_buildkit_layers(image_name)
     if bk_layers is not None:
         paths = [Path(p) for p in bk_layers]
@@ -218,29 +218,42 @@ def prepare_rootfs_layers_from_docker(
                      image_name, len(paths))
         return paths
 
-    # 1. Check containers/storage (zero-copy, user-owned)
+    # 2. Check containers/storage (legacy, for pre-existing cached images)
     layers = _get_store_layers(image_name)
     if layers is not None:
-        logger.info("Layer cache ready for %s: %d layers (zero-copy)",
+        logger.info("Layer cache ready for %s: %d layers (containers/storage)",
                      image_name, len(layers))
         return layers
 
-    # 2. Pull from registry into containers/storage
+    # 3. Pull via BuildKit (generates FROM {image} and builds)
     if pull:
-        logger.info("Pulling %s into containers/storage", image_name)
-        if not _containers_storage_pull(image_name):
-            raise RuntimeError(
-                f"Failed to pull {image_name!r} into containers/storage. "
-                f"Check network connectivity and image name."
-            )
+        try:
+            bk = BuildKitManager.get()
+            if bk.available:
+                logger.info("Pulling %s via BuildKit", image_name)
+                bk.pull(image_name)
+                bk_layers = get_buildkit_layers(image_name)
+                if bk_layers is not None:
+                    paths = [Path(p) for p in bk_layers]
+                    logger.info("Layer cache ready for %s: %d layers (buildkit pull)",
+                                 image_name, len(paths))
+                    return paths
+        except Exception as e:
+            logger.warning("BuildKit pull failed for %s: %s", image_name, e)
 
-        layers = _get_store_layers(image_name)
-        if layers is not None:
-            logger.info("Layer cache ready for %s: %d layers (zero-copy)",
-                         image_name, len(layers))
-            return layers
+        # 4. Fallback: pull into containers/storage (legacy path)
+        logger.info("Pulling %s into containers/storage (fallback)", image_name)
+        if _containers_storage_pull(image_name):
+            layers = _get_store_layers(image_name)
+            if layers is not None:
+                logger.info("Layer cache ready for %s: %d layers (containers/storage)",
+                             image_name, len(layers))
+                return layers
 
-    raise RuntimeError(f"Image {image_name!r} not found in containers/storage.")
+    raise RuntimeError(
+        f"Failed to pull {image_name!r}. "
+        f"Check network connectivity and image name."
+    )
 
 
 # ====================================================================== #

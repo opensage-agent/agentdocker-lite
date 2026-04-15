@@ -114,6 +114,51 @@ class BuildKitManager:
         logger.info("buildkitd running at %s", self._socket_path)
         return self._socket_path
 
+    def pull(self, image: str) -> dict:
+        """Pull a pre-built image via BuildKit LLB.
+
+        Uses BuildKit's native image source (``llb.Image()``) to pull
+        the image into the snapshot store. No Dockerfile needed.
+        Returns the same dict as build().
+        """
+        socket = self.ensure_running()
+        bin_path = self._gobin()
+
+        env = os.environ.copy()
+        gopath = subprocess.run(
+            ["go", "env", "GOPATH"], capture_output=True, text=True
+        ).stdout.strip()
+        if gopath:
+            env["PATH"] = f"{gopath}/bin:{env.get('PATH', '')}"
+
+        req = json.dumps({
+            "socket_path": socket,
+            "root_dir": self._root_dir,
+            "image_ref": image,
+        }).encode()
+
+        result = subprocess.run(
+            [bin_path, "buildkit-pull"],
+            input=req, capture_output=True, env=env, timeout=600,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"BuildKit pull failed for {image}: {result.stderr.decode()[-1000:]}"
+            )
+
+        resp = json.loads(result.stdout)
+
+        if resp.get("layer_paths"):
+            _buildkit_layer_cache[image] = resp["layer_paths"]
+        if resp.get("manifest_digest"):
+            try:
+                cfg = self.read_image_config(resp["manifest_digest"])
+                _buildkit_config_cache[image] = cfg
+            except Exception:
+                pass
+
+        return resp
+
     def build(self, context: str, dockerfile: str, tag: str) -> dict:
         """Build a Dockerfile via BuildKit.
 

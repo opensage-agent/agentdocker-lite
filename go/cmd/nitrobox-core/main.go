@@ -213,6 +213,32 @@ func main() {
 	})
 
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-pull",
+		Short: "Pull an image via BuildKit LLB",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				SocketPath string `json:"socket_path"`
+				RootDir    string `json:"root_dir"`
+				ImageRef   string `json:"image_ref"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			rootDir := req.RootDir
+			if rootDir == "" {
+				rootDir = nbxbuildkit.DefaultRootDir()
+			}
+			result, err := nbxbuildkit.PullImage(
+				req.SocketPath, rootDir, req.ImageRef,
+			)
+			if err != nil {
+				return err
+			}
+			return writeJSON(result)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "buildkit-build",
 		Short: "Build a Dockerfile via BuildKit",
 		RunE: func(cmd *cobra.Command, args []string) error {

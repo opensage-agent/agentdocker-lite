@@ -9,11 +9,84 @@ import (
 
 	"github.com/docker/cli/cli/config"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/moby/buildkit/util/progress/progressui"
 	"golang.org/x/sync/errgroup"
 )
+
+// PullImage pulls a pre-built image via BuildKit's LLB solver.
+// Equivalent to `FROM image` — the image is pulled into BuildKit's
+// snapshot store with full layer caching.
+func PullImage(socketPath, rootDir, imageRef string) (*BuildResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	c, err := client.New(ctx, "unix://"+socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("connect to buildkitd: %w", err)
+	}
+	defer c.Close()
+
+	// Build LLB: just llb.Image(ref) — equivalent to FROM
+	def, err := llb.Image(imageRef).Marshal(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("marshal LLB: %w", err)
+	}
+
+	solveOpt := client.SolveOpt{
+		Exports: []client.ExportEntry{
+			{
+				Type: client.ExporterImage,
+				Attrs: map[string]string{
+					"name": imageRef,
+					"push": "false",
+				},
+			},
+		},
+		Session: []session.Attachable{
+			authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
+				ConfigFile: config.LoadDefaultConfigFile(os.Stderr),
+			}),
+		},
+	}
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	ch := make(chan *client.SolveStatus)
+
+	var manifestDigest string
+	eg.Go(func() error {
+		resp, err := c.Solve(egCtx, def, solveOpt, ch)
+		if err != nil {
+			return err
+		}
+		if d, ok := resp.ExporterResponse["containerimage.digest"]; ok {
+			manifestDigest = d
+		}
+		return nil
+	})
+	eg.Go(func() error {
+		d, err := progressui.NewDisplay(os.Stderr, progressui.AutoMode)
+		if err != nil {
+			for range ch {
+			}
+			return nil
+		}
+		_, err = d.UpdateFrom(egCtx, ch)
+		return err
+	})
+
+	if err := eg.Wait(); err != nil {
+		return nil, fmt.Errorf("pull failed: %w", err)
+	}
+
+	result, err := resolveLayerPaths(rootDir, manifestDigest)
+	if err != nil {
+		return &BuildResult{ManifestDigest: manifestDigest}, fmt.Errorf("resolve layers: %w", err)
+	}
+	return result, nil
+}
 
 // BuildImage builds a Dockerfile using a running buildkitd instance.
 // Returns a BuildResult with the manifest digest and layer paths.
