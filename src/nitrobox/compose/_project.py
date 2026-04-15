@@ -548,6 +548,12 @@ class ComposeProject:
         vendor_dir = str(Path(__file__).resolve().parent.parent / "_vendor")
         if vendor_dir not in env.get("PATH", ""):
             env["PATH"] = vendor_dir + ":" + env.get("PATH", "")
+        # Point buildah/containers at the vendored netavark (and any future
+        # helper binaries we ship).  containers/common prepends this dir to
+        # its HelperBinariesDir search list before falling back to the
+        # podman system paths, so this makes buildah-image builds work
+        # even when the host has no podman/netavark installed.
+        env.setdefault("CONTAINERS_HELPER_BINARY_DIR", vendor_dir)
 
         result = _sp.run(
             [bin_path, "image-build"],

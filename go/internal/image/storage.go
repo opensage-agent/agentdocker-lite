@@ -197,12 +197,23 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string, error) {
 	ctx := context.Background()
 
+	// buildah's commit step requires a signature policy file.  PullImage
+	// builds one in-memory (NewPolicyContext), but BuildDockerfiles reads
+	// it from disk.  We don't ship /etc/containers/policy.json, so write
+	// a permissive policy to a temp file and point buildah at it —
+	// mirrors the PullImage policy (accept anything).
+	policyPath, err := writePermissivePolicy()
+	if err != nil {
+		return "", fmt.Errorf("write policy: %w", err)
+	}
+
 	opts := define.BuildOptions{
 		Output:                 tag,
 		ContextDirectory:       contextDir,
 		CommonBuildOpts:        &define.CommonBuildOptions{},
 		Layers:                 true,
 		RemoveIntermediateCtrs: true,
+		SignaturePolicyPath:    policyPath,
 		// IsolationOCIRootless: uses runc for proper rootless container execution.
 		// This is what podman uses for rootless builds.
 		Isolation: define.IsolationOCIRootless,
@@ -211,11 +222,54 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 	}
 
 	imageID, _, err := imagebuildah.BuildDockerfiles(ctx, store, opts, dockerfile)
+	// Whether the build succeeded or failed, buildah tends to leave its
+	// "working container" behind in containers/storage — the final stage
+	// commit produces an image but doesn't delete the builder.  Left
+	// around, it pins the base image's layers, so a later `rmi` fails
+	// with "image is in use by a container".  Nitrobox's runtime containers
+	// don't use containers/storage at all (they're namespace-managed), so
+	// anything in the container table is 100% buildah residue — safe to
+	// sweep.
+	cleanupBuildContainers(store)
 	if err != nil {
 		return "", fmt.Errorf("build failed: %w", err)
 	}
 
 	return imageID, nil
+}
+
+// cleanupBuildContainers deletes every container record in the store.
+// Only called from BuildImage, where the invariant is "nitrobox doesn't
+// own any containers here."  Errors are ignored — this is best-effort
+// post-build hygiene, not a correctness requirement.
+func cleanupBuildContainers(store storage.Store) {
+	containers, err := store.Containers()
+	if err != nil {
+		return
+	}
+	for _, c := range containers {
+		_ = store.DeleteContainer(c.ID)
+	}
+}
+
+// writePermissivePolicy writes a minimal signature policy that accepts
+// anything to a temp file, returning the path.  Same semantics as the
+// in-memory policy PullImage constructs via NewPRInsecureAcceptAnything.
+// writePermissivePolicy writes a minimal signature policy that accepts
+// anything to a temp file, returning the path.  Same semantics as the
+// in-memory policy PullImage constructs via NewPRInsecureAcceptAnything.
+func writePermissivePolicy() (string, error) {
+	const body = `{"default":[{"type":"insecureAcceptAnything"}]}`
+	f, err := os.CreateTemp("", "nitrobox-policy-*.json")
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(body); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), f.Close()
 }
 
 // DeleteImage removes an image and its exclusive layers from the store.
