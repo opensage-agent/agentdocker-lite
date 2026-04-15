@@ -174,6 +174,16 @@ func main() {
 				rootDir = nbxbuildkit.DefaultRootDir()
 			}
 
+			// Preserve Docker config path before entering userns
+			// (HOME changes to /root inside userns)
+			if os.Getenv("DOCKER_CONFIG") == "" {
+				home, _ := os.UserHomeDir()
+				dockerCfg := filepath.Join(home, ".docker")
+				if _, err := os.Stat(filepath.Join(dockerCfg, "config.json")); err == nil {
+					os.Setenv("DOCKER_CONFIG", dockerCfg)
+				}
+			}
+
 			if nbxbuildkit.IsRootlessChild() {
 				// We're the rootlesskit child — complete userns setup
 				// and exec buildkit-serve-inner (the actual server)
@@ -216,7 +226,27 @@ func main() {
 				"root_dir":    rootDir,
 			})
 			os.WriteFile(infoPath, infoJSON, 0644)
-			fmt.Fprintf(os.Stderr, "buildkit-serve: ready at %s\n", socketPath)
+
+			// Start the nitrobox handler (JSON-over-Unix-socket)
+			handlerPath, err := srv.StartHandler()
+			if err != nil {
+				srv.Stop()
+				return fmt.Errorf("start handler: %w", err)
+			}
+
+			// Write server info (overwrite earlier file)
+			infoPath = filepath.Join(rootDir, "server.json")
+			infoJSON, _ = json.Marshal(map[string]string{
+				"socket_path":  socketPath,
+				"handler_path": handlerPath,
+				"root_dir":     rootDir,
+			})
+			os.WriteFile(infoPath, infoJSON, 0644)
+
+			// Signal readiness
+			readyPath := filepath.Join(rootDir, "ready")
+			os.WriteFile(readyPath, []byte("1"), 0644)
+			fmt.Fprintf(os.Stderr, "buildkit-serve: ready at %s (handler: %s)\n", socketPath, handlerPath)
 
 			// Block until signal
 			sigCh := make(chan os.Signal, 1)
