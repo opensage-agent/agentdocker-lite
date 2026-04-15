@@ -297,11 +297,29 @@ def cmd_setup(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     elif has_subuid:
-        print("OK: subuid/subgid configured (multi-UID mapping)")
+        # Check range size — some images need >65536 UIDs (e.g. UID 197609)
+        subuid_count = 0
+        try:
+            with open("/etc/subuid") as f:
+                for line in f:
+                    parts = line.strip().split(":")
+                    if len(parts) == 3 and (parts[0] == user or parts[0] == str(uid)):
+                        subuid_count = max(subuid_count, int(parts[2]))
+        except (FileNotFoundError, ValueError):
+            pass
+        if subuid_count < 200000:
+            print(
+                f"WARN: subuid range too small ({subuid_count} UIDs). Some container "
+                f"images need >65536 UIDs.\n"
+                f"  Fix: sudo sed -i 's/{user}:[0-9]*:[0-9]*/{user}:100000:1000000/' "
+                f"/etc/subuid /etc/subgid"
+            )
+        else:
+            print("OK: subuid/subgid configured (multi-UID mapping)")
     else:
         print(
             f"WARN: no /etc/subuid entry for {user}.\n"
-            f"  Fix: echo '{user}:100000:65536' | sudo tee -a /etc/subuid /etc/subgid"
+            f"  Fix: echo '{user}:100000:1000000' | sudo tee -a /etc/subuid /etc/subgid"
         )
 
     vendored_pasta = vendor_dir / "pasta"
