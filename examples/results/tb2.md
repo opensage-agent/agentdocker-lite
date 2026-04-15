@@ -50,6 +50,7 @@
 
 ```bash
 git clone https://github.com/rucnyz/harbor.git
+cd harbor && uv sync --all-extras --dev && cd -
 docker login   # needed for prebuilt images
 
 # Cold start (first run populates caches)
