@@ -1167,25 +1167,22 @@ class Sandbox:
         whiteout_strategy = _detect_whiteout_strategy()
 
         if whiteout_strategy == "none":
-            logger.debug("Kernel too old for rootless layer cache, using flat rootfs")
-            self._base_rootfs = self._resolve_flat_rootfs(
-                image=config.image,
-                rootfs_cache_dir=rootfs_cache_dir,
+            raise RuntimeError(
+                "Kernel too old for rootless overlayfs (need 5.11+). "
+                "Cannot run in rootless mode on this kernel."
             )
-            self._layer_dirs: list[Path] | None = None
-            self._lowerdir_spec = str(self._base_rootfs)
+
+        self._base_rootfs, self._layer_dirs = self._resolve_base_rootfs(
+            image=config.image,
+            rootfs_cache_dir=rootfs_cache_dir,
+            fs_backend="overlayfs",
+        )
+        if self._layer_dirs:
+            self._lowerdir_spec = ":".join(
+                str(d) for d in reversed(self._layer_dirs)
+            )
         else:
-            self._base_rootfs, self._layer_dirs = self._resolve_base_rootfs(
-                image=config.image,
-                rootfs_cache_dir=rootfs_cache_dir,
-                fs_backend="overlayfs",
-            )
-            if self._layer_dirs:
-                self._lowerdir_spec = ":".join(
-                    str(d) for d in reversed(self._layer_dirs)
-                )
-            else:
-                self._lowerdir_spec = str(self._base_rootfs)
+            self._lowerdir_spec = str(self._base_rootfs)
 
         # Acquire shared locks on layer dirs — prevents concurrent deletion
         # while this sandbox's overlayfs uses them as lowerdir.
@@ -1243,28 +1240,14 @@ class Sandbox:
 
     @staticmethod
     def _resolve_base_rootfs(image, fs_backend="overlayfs", rootfs_cache_dir=Path()):
-        from nitrobox.image.layers import resolve_base_rootfs
-        return resolve_base_rootfs(image, rootfs_cache_dir, fs_backend)
+        """Resolve image to layer directories via BuildKit."""
+        candidate = Path(image)
+        if candidate.exists() and candidate.is_dir():
+            return candidate, None
 
-    @staticmethod
-    def _get_image_digest(image):
-        from nitrobox.image.layers import _get_image_digest
-        return _get_image_digest(image)
-
-    @staticmethod
-    def _resolve_cached_rootfs(image, rootfs_cache_dir, prepare_fn, *, verify_fn=None, label="rootfs"):
-        from nitrobox.image.layers import _resolve_cached_rootfs
-        return _resolve_cached_rootfs(image, rootfs_cache_dir, prepare_fn, verify_fn=verify_fn, label=label)
-
-    @staticmethod
-    def _resolve_btrfs_rootfs(image, rootfs_cache_dir):
-        from nitrobox.image.layers import resolve_btrfs_rootfs
-        return resolve_btrfs_rootfs(image, rootfs_cache_dir)
-
-    @staticmethod
-    def _resolve_flat_rootfs(image, rootfs_cache_dir):
-        from nitrobox.image.layers import resolve_flat_rootfs
-        return resolve_flat_rootfs(image, rootfs_cache_dir)
+        from nitrobox.image.layers import prepare_rootfs_layers_from_docker
+        layer_dirs = prepare_rootfs_layers_from_docker(image, rootfs_cache_dir, pull=True)
+        return layer_dirs[0], layer_dirs
 
     # ================================================================== #
     #  Prerequisites                                                       #

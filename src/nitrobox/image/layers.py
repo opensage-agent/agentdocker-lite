@@ -7,9 +7,12 @@ as overlay diff directories.
 
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import logging
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,73 @@ def prepare_rootfs_layers_from_docker(
 # ====================================================================== #
 #  Layer locking (for concurrent sandbox safety)                           #
 # ====================================================================== #
+
+
+def rmtree_mapped(path: str | Path) -> None:
+    """Remove a directory that may contain files with mapped UIDs.
+
+    Sandbox overlay upper dirs have files owned by mapped UIDs
+    (e.g. host uid 493316). Regular rmtree fails on these —
+    we fork into a userns with the same UID mapping to delete as root.
+    """
+    path = Path(path)
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+        return
+    except OSError:
+        pass
+    _rmtree_in_userns(path)
+
+
+def _rmtree_in_userns(path: Path) -> None:
+    """Enter userns and rm -rf as mapped root."""
+    from nitrobox.config import detect_subuid_range
+    subuid = detect_subuid_range()
+    if not subuid:
+        shutil.rmtree(path, ignore_errors=True)
+        return
+
+    outer_uid, sub_start, sub_count = subuid
+    outer_gid = os.getgid()
+
+    userns_r, userns_w = os.pipe()
+    go_r, go_w = os.pipe()
+
+    pid = os.fork()
+    if pid == 0:
+        os.close(userns_r)
+        os.close(go_w)
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.unshare(0x10000000) != 0:  # CLONE_NEWUSER
+            os._exit(1)
+        os.write(userns_w, b"R")
+        os.close(userns_w)
+        os.read(go_r, 1)
+        os.close(go_r)
+        os.execvp("rm", ["rm", "-rf", str(path)])
+        os._exit(127)
+
+    os.close(userns_w)
+    os.close(go_r)
+    os.read(userns_r, 1)
+    os.close(userns_r)
+
+    subprocess.run(
+        ["newuidmap", str(pid), "0", str(outer_uid), "1",
+         "1", str(sub_start), str(sub_count)],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["newgidmap", str(pid), "0", str(outer_gid), "1",
+         "1", str(sub_start), str(sub_count)],
+        capture_output=True,
+    )
+
+    os.write(go_w, b"G")
+    os.close(go_w)
+    os.waitpid(pid, 0)
 
 
 def acquire_layer_locks(layer_dirs: list[Path]) -> list[int]:
