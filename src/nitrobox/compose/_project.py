@@ -123,6 +123,14 @@ class ComposeProject:
         rootfs_cache_dir: Directory to cache rootfs images.
     """
 
+    # -- global registry for atexit cleanup --------------------------------
+    # Mirrors Sandbox's pattern (sandbox.py): every constructed instance is
+    # tracked so we can best-effort clean up on interpreter shutdown (crash,
+    # KeyboardInterrupt, sys.exit, etc.) instead of leaking sandboxes,
+    # network namespaces, and /tmp/nitrobox_*/<proj>_volumes directories.
+    _live_instances: list["ComposeProject"] = []
+    _atexit_registered: bool = False
+
     def __init__(
         self,
         compose_file: str | Path | list[str | Path],
@@ -163,6 +171,47 @@ class ComposeProject:
         self._shared_nets: dict[str, SharedNetwork] = {}
         # service name → background health monitor
         self._health_monitors: dict[str, _HealthMonitor] = {}
+
+        # Register AFTER all init state is set — partial-init objects should
+        # not be tracked (atexit must be able to safely call down() on any
+        # live instance).
+        self._register(self)
+
+    # -- atexit registry ----------------------------------------------- #
+
+    @classmethod
+    def _register(cls, instance: "ComposeProject") -> None:
+        cls._live_instances.append(instance)
+        if not cls._atexit_registered:
+            import atexit
+            atexit.register(cls._atexit_cleanup)
+            cls._atexit_registered = True
+
+    @classmethod
+    def _unregister(cls, instance: "ComposeProject") -> None:
+        try:
+            cls._live_instances.remove(instance)
+        except ValueError:
+            pass
+
+    @classmethod
+    def _atexit_cleanup(cls) -> None:
+        """Best-effort teardown of live projects at interpreter shutdown.
+
+        Iterates a copy of the live list — ``down()`` is expected to call
+        ``_unregister`` which mutates the original. Errors are swallowed:
+        atexit handlers must never raise during shutdown, otherwise other
+        handlers are skipped.
+        """
+        for proj in list(cls._live_instances):
+            try:
+                # rmi=None: don't touch image cache on crash (may be shared
+                # with other projects).  volumes=True: the volume_dir is
+                # per-project scratch; nobody will come back to read it.
+                proj.down(rmi=None, volumes=True)
+            except Exception:
+                pass
+        cls._live_instances.clear()
 
     # -- public API ---------------------------------------------------- #
 
@@ -324,6 +373,10 @@ class ComposeProject:
         # Remove images from containers/storage (mirrors docker compose down --rmi)
         if rmi is not None:
             self._remove_image_cache(rmi)
+
+        # Drop from the atexit registry so interpreter shutdown doesn't
+        # try to double-teardown an already-cleaned project.
+        self._unregister(self)
 
         logger.info("ComposeProject %s: all services stopped", self._project_name)
 

@@ -1794,6 +1794,137 @@ class TestDownOptions:
         shutil.rmtree(vol_dir, ignore_errors=True)
 
 
+class TestComposeProjectAtexit:
+    """ComposeProject registers atexit handler so crashed/interrupted processes
+    don't leak sandboxes, network namespaces, and volume directories."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        from nitrobox._gobin import gobin
+        bin_path = gobin()
+        if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+            pytest.skip("requires nitrobox-core Go binary")
+
+    def test_register_unregister_pure(self):
+        """Class-level registry mechanics work without any real project.
+
+        Uses a stand-in object so we don't need nitrobox-core or a compose
+        file to exercise the _register / _unregister / _atexit_registered
+        bookkeeping.
+        """
+        from nitrobox.compose._project import ComposeProject
+
+        class _Stub:
+            pass
+
+        stub = _Stub()
+        ComposeProject._register(stub)  # type: ignore[arg-type]
+        try:
+            assert ComposeProject._atexit_registered is True
+            assert stub in ComposeProject._live_instances
+        finally:
+            ComposeProject._unregister(stub)  # type: ignore[arg-type]
+
+        assert stub not in ComposeProject._live_instances
+
+        # _unregister is idempotent — second call must not raise.
+        ComposeProject._unregister(stub)  # type: ignore[arg-type]
+
+    def test_init_registers_live_instance(self, tmp_path):
+        """Constructing a real ComposeProject adds it to _live_instances."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: alpine:latest
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-atexit-init",
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        try:
+            assert proj in ComposeProject._live_instances
+            assert ComposeProject._atexit_registered is True
+        finally:
+            # down() must be callable even though up() never ran — must not
+            # raise, and must unregister from the live list.
+            proj.down()
+
+        assert proj not in ComposeProject._live_instances
+
+    def test_down_unregisters_live_instance(self, tmp_path):
+        """down() removes project from _live_instances so atexit doesn't
+        try to double-clean a project the user already tore down."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: alpine:latest
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-atexit-down",
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        proj.up()
+        assert proj in ComposeProject._live_instances
+
+        proj.down()
+        assert proj not in ComposeProject._live_instances
+
+        # Calling down() a second time (e.g. via atexit after manual down)
+        # must be a safe no-op — _unregister tolerates the missing entry.
+        proj.down()
+        assert proj not in ComposeProject._live_instances
+
+    def test_atexit_cleanup_handles_failures(self):
+        """_atexit_cleanup never raises, even if a live instance's down()
+        throws. Other live instances must still be attempted and the
+        live list must be cleared."""
+        from nitrobox.compose._project import ComposeProject
+
+        class _Bad:
+            def down(self, **kw):
+                raise RuntimeError("boom")
+
+        class _Good:
+            def __init__(self):
+                self.down_called = False
+            def down(self, **kw):
+                self.down_called = True
+
+        # Snapshot + restore the real registry so we don't interfere with
+        # other tests running in the same interpreter.
+        saved = list(ComposeProject._live_instances)
+        ComposeProject._live_instances.clear()
+
+        try:
+            bad = _Bad()
+            good = _Good()
+            ComposeProject._live_instances.extend([bad, good])
+
+            # Must not raise even though _Bad.down() throws.
+            ComposeProject._atexit_cleanup()
+
+            # Good instance was attempted despite bad one failing earlier.
+            assert good.down_called is True
+            # List is cleared after cleanup sweep.
+            assert ComposeProject._live_instances == []
+        finally:
+            ComposeProject._live_instances.clear()
+            ComposeProject._live_instances.extend(saved)
+
+
 class TestDetachMode:
     """Tests for up(detach=True) and health_status()/wait_healthy()."""
 
