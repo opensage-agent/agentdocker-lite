@@ -61,7 +61,8 @@ from pathlib import Path
 
 def run_harbor(
     harbor_dir: str,
-    dataset: str,
+    dataset: str | None,
+    path: str | None,
     agent: str | None,
     agent_import_path: str | None,
     model: str | None,
@@ -76,7 +77,7 @@ def run_harbor(
     """Run harbor and return timing results."""
     cmd = [
         "uv", "run", "harbor", "run",
-        "-d", dataset,
+        *(["-p", path] if path else ["-d", dataset]),
         "-e", env_type,
         "--n-concurrent", str(n_concurrent),
         "--n-attempts", "1",
@@ -307,7 +308,12 @@ def main():
         description="Harbor e2e benchmark: Docker vs nitrobox",
     )
     parser.add_argument("--harbor-dir", required=True)
-    parser.add_argument("--dataset", default="terminal-bench@2.0")
+    parser.add_argument("--dataset", "-d", default=None,
+                        help="Dataset name@version (e.g. 'terminal-bench@2.0'). "
+                        "Mutually exclusive with --path.")
+    parser.add_argument("--path", "-p", default=None,
+                        help="Local path to a task or dataset directory "
+                        "(e.g. 'datasets/swebench'). Mutually exclusive with --dataset.")
     parser.add_argument("--agent", default=None)
     parser.add_argument("--agent-import-path", default=None)
     parser.add_argument("--model", "-m", default=None)
@@ -326,11 +332,16 @@ def main():
     concurrency_levels = [int(c) for c in args.concurrency.split(",")]
     env_types = [e.strip() for e in args.envs.split(",")]
 
+    if args.dataset and args.path:
+        parser.error("--dataset and --path are mutually exclusive")
+    if not args.dataset and not args.path:
+        args.dataset = "terminal-bench@2.0"
+
     if not args.agent and not args.agent_import_path:
         args.agent = "oracle"
 
     print(f"Harbor e2e benchmark")
-    print(f"  Dataset:     {args.dataset}")
+    print(f"  Dataset:     {args.path or args.dataset}")
     print(f"  Agent:       {args.agent or args.agent_import_path}")
     if args.model:
         print(f"  Model:       {args.model}")
@@ -350,6 +361,7 @@ def main():
             r = run_harbor(
                 harbor_dir=args.harbor_dir,
                 dataset=args.dataset,
+                path=args.path,
                 agent=args.agent,
                 agent_import_path=args.agent_import_path,
                 model=args.model,
