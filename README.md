@@ -81,6 +81,7 @@ Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 
 - Linux kernel 5.11+
 - `util-linux` (`unshare`)
 - Python >= 3.12
+- uidmap (`sudo apt-get install -y uidmap`)
 
 No Docker or Podman required. Images are pulled directly from container registries via built-in OCI client. If Docker/Podman is available, it's used for faster local cache hits.
 
@@ -101,7 +102,6 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 ```bash
 pip install nitrobox
 
-# optional, for full checkpoint capability, require sudo or docker group 
 nitrobox setup
 ```
 
@@ -110,9 +110,8 @@ nitrobox setup
 Requires [Rust](https://rustup.rs/), [Go 1.25+](https://go.dev/), and [maturin](https://www.maturin.rs/):
 
 ```bash
-uv sync
+uv sync --all-extras --dev
 
-# optional
 nitrobox setup
 ```
 
@@ -346,3 +345,15 @@ python examples/benchmark.py           # Full performance comparison (all backen
 ```
 
 See [docs/quick_start.md](docs/quick_start.md) for detailed usage guide.
+
+## Known limitations
+
+### Cold image builds are slower than Docker
+
+When a `docker-compose.yml` uses `build:` (e.g. SWE-bench tasks that `FROM` a prebuilt image), nitrobox builds via **buildah** (daemonless) instead of the Docker daemon. On a cold cache (first run), this is slower than Docker for two reasons:
+
+1. **No shared daemon cache.** Docker's daemon deduplicates concurrent pulls — if 10 containers need the same base image, Docker pulls it once. Buildah is daemonless: each concurrent build independently resolves and pulls layers, competing for `containers/storage` file locks. The more concurrency, the worse the contention.
+
+2. **User namespace overhead.** Rootless buildah runs inside a user namespace, adding syscall overhead to every filesystem operation during the build (overlayfs in userns, `newuidmap`/`newgidmap` for ID remapping).
+
+Once images are cached in `containers/storage`, subsequent runs skip the pull/build entirely — this is where nitrobox's **50x lifecycle speedup** kicks in. For benchmarks, use `--no-delete` to preserve the image cache across trials.
