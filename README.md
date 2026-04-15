@@ -290,16 +290,16 @@ output, _ = sb.run("cat /workspace/data.txt")
 | Reset loop | 2.0/s | 62.8/s | **31x** |
 | 16x concurrent | 32 cmd/s | 655 cmd/s | **20x** |
 
-### End-to-end: Terminal-Bench 2.0 (88 tasks, c=16, oracle agent)
+### End-to-end: Terminal-Bench 2.0 (88 tasks, c=16, oracle agent, hot cache)
 
 | | Docker | nitrobox | Speedup |
 |---|---|---|---|
-| **Wall time** | 2094s (35 min) | 913s (15 min) | **2.29x** |
-| Pass rate | 83/88 | 84/88 | +1 |
-| Errors | 1 | 0 | — |
-| Teardown (mean) | 25.5s | 1.1s | **23x** |
+| **Wall time** | 1961.8s (33 min) | 931.2s (16 min) | **2.11x** |
+| Pass rate | 82/88 | 82/88 | — |
+| Errors | 2 | 0 | — |
+| Teardown (mean) | 15.6s | 1.1s | **14.2x** |
 
-Full benchmark: [dev/support/tb2.md](dev/support/tb2.md) | Reproduce: `python examples/bench_harbor_e2e.py`
+Full benchmark: [examples/results/tb2.md](examples/results/tb2.md) | Reproduce: `python examples/bench_harbor_e2e.py`
 
 ## Docker migration cheatsheet
 
@@ -339,9 +339,10 @@ Sandbox "worker-0"
 ## Examples
 
 ```bash
-python examples/basic_usage.py      # Full feature demo
-python examples/bench_swebench.py   # SWE-bench-style Docker vs nitrobox comparison
-python examples/benchmark.py        # Full performance comparison (all backends)
+python examples/basic_usage.py         # Full feature demo
+python examples/bench_harbor_e2e.py    # E2E Docker vs nitrobox via harbor (tb2, swebench-verified, ...)
+python examples/bench_swebench.py      # SWE-bench-style micro-benchmark
+python examples/benchmark.py           # Full performance comparison (all backends)
 ```
 
 See [docs/quick_start.md](docs/quick_start.md) for detailed usage guide.
