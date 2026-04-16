@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -136,97 +135,6 @@ def _get_image_diff_ids(image_name: str) -> list[str]:
     )
 
 
-def _read_config_from_containers_storage(image_name: str) -> ImageConfig | None:
-    """Read OCI image config from containers/storage.
-
-    Looks up the image in ``overlay-images/images.json``, then reads
-    the config blob from the image's big-data directory.  This is the
-    primary source for buildah-built and podman-pulled images.
-    """
-    from nitrobox.image.layers import _containers_storage_root
-
-    graph_root = _containers_storage_root()
-    if graph_root is None:
-        return None
-
-    try:
-        # Detect driver
-        driver = None
-        for d in ("overlay", "vfs"):
-            if (graph_root / f"{d}-images").is_dir():
-                driver = d
-                break
-        if driver is None:
-            return None
-
-        images_file = graph_root / f"{driver}-images" / "images.json"
-        if not images_file.exists():
-            return None
-
-        images = json.loads(images_file.read_text())
-
-        # Find image by name (same matching logic as _get_store_layers)
-        img_id = None
-        search_names = [image_name]
-        if ":" not in image_name:
-            search_names.append(image_name + ":latest")
-        for img in images:
-            for name in img.get("names", []):
-                for search in search_names:
-                    if name == search or name.endswith("/" + search):
-                        img_id = img.get("id")
-                        break
-                if img_id:
-                    break
-            if img_id:
-                break
-        if not img_id:
-            return None
-
-        # Read config blob from big-data directory.
-        # The config digest equals the image ID for buildah-built images.
-        # File name is "=" + base64(digest_with_prefix).
-        bd_dir = graph_root / f"{driver}-images" / img_id
-        if not bd_dir.is_dir():
-            return None
-
-        config_digest = f"sha256:{img_id}"
-        encoded_name = "=" + base64.b64encode(config_digest.encode()).decode()
-        config_path = bd_dir / encoded_name
-        if not config_path.exists():
-            # Fallback: try reading the manifest to find the config digest
-            manifest_path = bd_dir / "manifest"
-            if manifest_path.exists():
-                manifest = json.loads(manifest_path.read_text())
-                config_digest = manifest.get("config", {}).get("digest", "")
-                if config_digest:
-                    encoded_name = "=" + base64.b64encode(
-                        config_digest.encode()
-                    ).decode()
-                    config_path = bd_dir / encoded_name
-            if not config_path.exists():
-                return None
-
-        oci_config = json.loads(config_path.read_text())
-        cfg = oci_config.get("config", {})
-
-        result = ImageConfig(
-            cmd=cfg.get("Cmd"),
-            entrypoint=cfg.get("Entrypoint"),
-            env=_parse_docker_env(cfg.get("Env")),
-            working_dir=cfg.get("WorkingDir") or None,
-            exposed_ports=_parse_docker_ports(cfg.get("ExposedPorts")),
-            diff_ids=oci_config.get("rootfs", {}).get("diff_ids", []),
-        )
-        logger.debug("containers/storage config for %s: working_dir=%s",
-                      image_name, result.get("working_dir"))
-        return result
-
-    except Exception as e:
-        logger.debug("containers/storage config read failed for %s: %s",
-                     image_name, e)
-        return None
-
 
 def get_image_config(image_name: str) -> dict | None:
     """Extract CMD, ENTRYPOINT, ENV, WORKDIR from a Docker/OCI image.
@@ -247,13 +155,27 @@ def get_image_config(image_name: str) -> dict | None:
     if cached is not None:
         return cached
 
-    # 2. containers/storage — primary source for pulled and buildah-built images
-    store_cfg = _read_config_from_containers_storage(image_name)
-    if store_cfg is not None:
-        _image_store_populate(image_name, store_cfg)
-        return store_cfg
+    # 1.5. BuildKit image store — check if image is registered and read config
+    try:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        cached = bk.check(image_name)
+        if cached and cached.get("manifest_digest"):
+            oci_cfg = bk.read_image_config(cached["manifest_digest"])
+            oci = oci_cfg.get("config", {})
+            result: ImageConfig = {
+                "cmd": oci.get("Cmd"),
+                "entrypoint": oci.get("Entrypoint"),
+                "env": _parse_docker_env(oci.get("Env")),
+                "working_dir": oci.get("WorkingDir") or "/",
+                "exposed_ports": list((oci.get("ExposedPorts") or {}).keys()),
+            }
+            _image_store_populate(image_name, result)
+            return result
+    except Exception:
+        pass
 
-    # 3. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
+    # 2. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
     disk_cfg = _read_config_from_manifest_cache(image_name)
     if disk_cfg is not None:
         _image_store_populate(image_name, disk_cfg)

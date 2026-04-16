@@ -13,7 +13,6 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -370,56 +369,22 @@ class ComposeProject:
             shutil.rmtree(self._volume_dir, ignore_errors=True)
             self._volume_dir = None
 
-        # Remove images from containers/storage (mirrors docker compose down --rmi)
+        # Delete images from containerd image store (matches Docker --rmi).
+        # Build cache (solver cache) is NOT affected — rebuilds stay fast.
         if rmi is not None:
-            self._remove_image_cache(rmi)
+            from nitrobox.image.buildkit import BuildKitManager
+            try:
+                bk = BuildKitManager.get()
+                for image in self._image_map.values():
+                    bk.delete_image(image)
+            except Exception:
+                pass
 
         # Drop from the atexit registry so interpreter shutdown doesn't
         # try to double-teardown an already-cleaned project.
         self._unregister(self)
 
         logger.info("ComposeProject %s: all services stopped", self._project_name)
-
-    def _remove_image_cache(self, mode: str) -> None:
-        """Remove images from containers/storage used by this project.
-
-        Mirrors ``docker compose down --rmi``:
-
-        - ``"all"``: remove all images (pulled + built).
-        - ``"local"``: remove only locally-built images
-          (those without a ``/`` in the name, i.e. no registry prefix).
-
-        Layers shared with other images are kept (same as ``docker rmi``).
-        """
-        import subprocess
-
-        from nitrobox._gobin import gobin
-        bin_path = gobin()
-
-        for name, image in self._image_map.items():
-            if mode == "local" and "/" in image:
-                continue  # skip registry images in "local" mode
-
-            try:
-                req = json.dumps({
-                    "image": image,
-                    "run_root": f"/tmp/nitrobox-containers-run-{os.getuid()}",
-                })
-                env = dict(os.environ)
-                env["_NITROBOX_DELETE_CONFIG"] = req
-                r = subprocess.run(
-                    [bin_path, "image-delete"],
-                    capture_output=True,
-                    env=env,
-                    timeout=60,
-                )
-                if r.returncode == 0:
-                    logger.debug("Removed image %s from containers/storage", image)
-                else:
-                    logger.warning("Could not remove image %s: rc=%d %s",
-                                   image, r.returncode, r.stderr.decode().strip()[:200])
-            except Exception as e:
-                logger.warning("image cleanup failed for %s: %s", image, e)
 
     def reset(self) -> None:
         """Reset all sandboxes and restart service commands.
@@ -460,18 +425,9 @@ class ComposeProject:
     def _resolve_image_map(self) -> dict[str, str]:
         """Resolve image names and build missing images.
 
-        Mirrors Docker Compose's ``ensureImagesExists`` logic:
-
-        - Resolve image names from our own compose parser (no
-          ``docker compose config`` subprocess).
-        - For ``build:`` services: ``{project_name}-{service_name}``
-          (same convention as Docker Compose).
-        - Check if image exists via Docker Engine API (~5ms).
-        - Build missing images via Docker Engine API ``POST /build``.
+        Uses BuildKit (managed buildkitd daemon) for fast concurrent builds
+        with in-memory content-addressable cache.
         """
-        from nitrobox.docker_api import get_client
-
-        get_client()
         project = self._project_name or self._compose_files[0].parent.name
 
         mapping: dict[str, str] = {}
@@ -482,86 +438,28 @@ class ComposeProject:
                 mapping[name] = f"{project}-{name}"
 
         # Build missing images for services with build: section.
-        # Uses buildah (via nitrobox-core image-build) to build directly
-        # into containers/storage — no Docker daemon needed.
-        from nitrobox.image.layers import _get_store_layers
+        from nitrobox.image.buildkit import BuildKitManager
+
+        bk = BuildKitManager.get()
+
         for name, svc in self._defs.items():
             if not svc.build or name not in mapping:
                 continue
 
             image_name = mapping[name]
-            # Skip if already in containers/storage
-            if _get_store_layers(image_name) is not None:
+
+            # Skip if already registered in image store
+            if bk.check(image_name) is not None:
                 continue
 
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}
             context = str(build_cfg.get("context", "."))
             dockerfile = build_cfg.get("dockerfile", "Dockerfile")
 
-            logger.info("Building image for service %s: %s (buildah)", name, image_name)
-            self._buildah_build(context, dockerfile, image_name)
+            logger.info("Building image for service %s: %s (buildkit)", name, image_name)
+            bk.build(context, dockerfile, image_name)
 
         return mapping
-
-    @staticmethod
-    def _buildah_build(context: str, dockerfile: str, tag: str) -> None:
-        """Build an image using buildah via nitrobox-core (no Docker daemon).
-
-        nitrobox-core image-build uses MaybeReexecUsingUserNamespace() internally
-        (same as podman) to handle userns, UID mapping, and overlay permissions.
-        No manual fork+unshare needed from Python.
-        """
-        import json as _json
-        import subprocess as _sp
-        from pathlib import Path
-
-        from nitrobox._gobin import gobin
-        bin_path = gobin()
-
-        from nitrobox.image.layers import _containers_storage_root
-        graph_root = _containers_storage_root()
-        if graph_root is None:
-            graph_root = Path.home() / ".local/share/containers/storage"
-            graph_root.mkdir(parents=True, exist_ok=True)
-        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
-        run_root.mkdir(parents=True, exist_ok=True)
-
-        req = _json.dumps({
-            "dockerfile": dockerfile,
-            "context": context,
-            "tag": tag,
-            "graph_root": str(graph_root),
-            "run_root": str(run_root),
-        }).encode()
-
-        # Ensure buildah has Docker credentials + pasta in PATH.
-        env = os.environ.copy()
-        if "DOCKER_CONFIG" not in env:
-            docker_cfg = Path.home() / ".docker"
-            if (docker_cfg / "config.json").exists():
-                env["DOCKER_CONFIG"] = str(docker_cfg)
-        if "XDG_RUNTIME_DIR" not in env:
-            env["XDG_RUNTIME_DIR"] = f"/tmp/nitrobox-run-{os.getuid()}"
-            os.makedirs(env["XDG_RUNTIME_DIR"], exist_ok=True)
-        # Ensure vendored pasta is in PATH (needed by buildah for networking)
-        vendor_dir = str(Path(__file__).resolve().parent.parent / "_vendor")
-        if vendor_dir not in env.get("PATH", ""):
-            env["PATH"] = vendor_dir + ":" + env.get("PATH", "")
-        # Point buildah/containers at the vendored netavark (and any future
-        # helper binaries we ship).  containers/common prepends this dir to
-        # its HelperBinariesDir search list before falling back to the
-        # podman system paths, so this makes buildah-image builds work
-        # even when the host has no podman/netavark installed.
-        env.setdefault("CONTAINERS_HELPER_BINARY_DIR", vendor_dir)
-
-        result = _sp.run(
-            [bin_path, "image-build"],
-            input=req, capture_output=True, env=env,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"buildah build failed for {tag}: {result.stderr.decode()[:500]}"
-            )
 
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""

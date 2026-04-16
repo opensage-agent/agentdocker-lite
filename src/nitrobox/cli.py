@@ -147,125 +147,6 @@ def cmd_kill(args: argparse.Namespace) -> None:
     Sandbox.cleanup_stale(str(base))
 
 
-def _warmup_layer_cache(docker: str | None, *, min_group_size: int = 10) -> None:
-    """Import representative Docker images to warm the containers/storage layer cache.
-
-    Scans Docker for images, groups by namespace (e.g. ``swebench/``,
-    ``ubuntu``), and imports one image per group.  Shared base layers
-    are deduplicated by containers/storage, so importing one image from
-    a family effectively caches the base layers for all images in that
-    family.
-    """
-    import subprocess
-
-    if not docker:
-        return
-
-    # Check if containers/storage already has images (skip if warm)
-    from nitrobox.image.layers import _containers_storage_root
-    store = _containers_storage_root()
-    if store is not None:
-        # Check if store already has overlay-images dir with content
-        images_json = store / "overlay-images" / "images.json"
-        if images_json.exists():
-            import json
-            try:
-                imgs = json.loads(images_json.read_text())
-                if len(imgs) > 3:
-                    print(f"OK: layer cache already warm ({len(imgs)} images in store)")
-                    return
-            except Exception:
-                pass
-
-    # List Docker images
-    print("Scanning Docker images...", end="", flush=True)
-    result = subprocess.run(
-        [docker, "images", "--format", "{{.Repository}}:{{.Tag}}"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        print(" no images found")
-        return
-
-    images = [
-        line.strip() for line in result.stdout.strip().splitlines()
-        if line.strip() and "<none>" not in line
-    ]
-    if not images:
-        print(" no images found")
-        return
-    print(f" found {len(images)}")
-
-    # Group by namespace (first path component before '/')
-    # e.g. "swebench/sweb.eval..." → "swebench"
-    #      "ubuntu:22.04" → "ubuntu"
-    #      "django__django-123:latest" → "django__django-123"
-    from collections import Counter
-    namespaces: Counter[str] = Counter()
-    ns_to_image: dict[str, str] = {}
-    for img in images:
-        repo = img.split(":")[0]
-        ns = repo.split("/")[0] if "/" in repo else repo.split("__")[0] if "__" in repo else repo
-        namespaces[ns] += 1
-        if ns not in ns_to_image:
-            ns_to_image[ns] = img
-
-    # Only warmup for namespaces with multiple images (shared base layers)
-    # or well-known base images
-    well_known = {"ubuntu", "debian", "python", "node", "alpine", "golang", "ruby"}
-    candidates = []
-    for ns, count in namespaces.most_common():
-        if count >= min_group_size or ns in well_known:
-            candidates.append((ns, count, ns_to_image[ns]))
-
-    if not candidates:
-        print("SKIP: no image families to warm (< 2 images per namespace)")
-        return
-
-    print(f"Warming layer cache from Docker ({len(images)} images, "
-          f"{len(candidates)} base families)...")
-
-    from nitrobox.image.layers import _containers_storage_pull
-    import time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    def _import_one(ns: str, count: int, img: str) -> tuple[str, str | bool]:
-        try:
-            return ns, _containers_storage_pull(img)
-        except Exception:
-            return ns, False
-
-    t0 = time.monotonic()
-    succeeded = 0
-    # Pull first one serially (caches the most shared layers),
-    # then remaining in parallel (they mostly reuse cached layers).
-    first_ns, first_count, first_img = candidates[0]
-    print(f"  [{first_ns}] {first_img} ({first_count} images)...", end="", flush=True)
-    _, result = _import_one(first_ns, first_count, first_img)
-    if result:
-        print(" done")
-        succeeded += 1
-    else:
-        print(" failed (skipped)")
-
-    if len(candidates) > 1:
-        remaining = candidates[1:]
-        print(f"  Importing {len(remaining)} more families in parallel...")
-        with ThreadPoolExecutor(max_workers=min(8, len(remaining))) as pool:
-            futures = {
-                pool.submit(_import_one, ns, count, img): (ns, count, img)
-                for ns, count, img in remaining
-            }
-            for future in as_completed(futures):
-                ns, count, img = futures[future]
-                _, result = future.result()
-                status = "done" if result else "failed (skipped)"
-                print(f"  [{ns}] {img} ({count} images)... {status}")
-                if result:
-                    succeeded += 1
-
-    elapsed = time.monotonic() - t0
-    print(f"OK: layer cache warmed ({succeeded}/{len(candidates)} families, {elapsed:.0f}s)")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -297,11 +178,29 @@ def cmd_setup(args: argparse.Namespace) -> None:
         )
         sys.exit(1)
     elif has_subuid:
-        print("OK: subuid/subgid configured (multi-UID mapping)")
+        # Check range size — some images need >65536 UIDs (e.g. UID 197609)
+        subuid_count = 0
+        try:
+            with open("/etc/subuid") as f:
+                for line in f:
+                    parts = line.strip().split(":")
+                    if len(parts) == 3 and (parts[0] == user or parts[0] == str(uid)):
+                        subuid_count = max(subuid_count, int(parts[2]))
+        except (FileNotFoundError, ValueError):
+            pass
+        if subuid_count < 200000:
+            print(
+                f"WARN: subuid range too small ({subuid_count} UIDs). Some container "
+                f"images need >65536 UIDs.\n"
+                f"  Fix: sudo sed -i 's/{user}:[0-9]*:[0-9]*/{user}:100000:1000000/' "
+                f"/etc/subuid /etc/subgid"
+            )
+        else:
+            print("OK: subuid/subgid configured (multi-UID mapping)")
     else:
         print(
             f"WARN: no /etc/subuid entry for {user}.\n"
-            f"  Fix: echo '{user}:100000:65536' | sudo tee -a /etc/subuid /etc/subgid"
+            f"  Fix: echo '{user}:100000:1000000' | sudo tee -a /etc/subuid /etc/subgid"
         )
 
     vendored_pasta = vendor_dir / "pasta"
@@ -336,6 +235,15 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print(f"OK: kernel {kver} (>= 5.11, rootless overlayfs supported)")
     else:
         print(f"WARN: kernel {kver} (< 5.11, rootless overlayfs may not work)")
+
+    # ---- BuildKit daemon (embedded in nitrobox-core) -----------------------
+    try:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        bk.ensure_running()
+        print("OK: embedded buildkitd running")
+    except Exception as e:
+        print(f"WARN: buildkitd failed to start: {e}")
 
     # ---- Docker-dependent setup -------------------------------------------
     docker = shutil.which("docker")
@@ -469,8 +377,6 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 else:
                     print(f"WARN: CRIU install failed: {result.stderr.strip()[:200]}")
 
-    # ---- layer cache warmup from Docker -----------------------------------
-    _warmup_layer_cache(docker)
 
     # ---- summary ----------------------------------------------------------
     if ok:
@@ -478,15 +384,6 @@ def cmd_setup(args: argparse.Namespace) -> None:
     else:
         print("\nSetup incomplete. See errors above.")
 
-
-def cmd_warmup(args: argparse.Namespace) -> None:
-    """Import Docker images into containers/storage layer cache."""
-    import shutil
-    docker = shutil.which("docker")
-    if not docker:
-        print("ERROR: Docker not found. Nothing to warm from.")
-        return
-    _warmup_layer_cache(docker, min_group_size=args.min_group_size)
 
 
 def main() -> None:
@@ -503,13 +400,12 @@ def main() -> None:
     sub.add_parser("ps", help="list sandboxes")
     sub.add_parser("cleanup", help="remove stale sandboxes")
     sub.add_parser("setup", help="configure rootless prerequisites")
-    warmup_p = sub.add_parser("warmup", help="import Docker images into layer cache")
-    warmup_p.add_argument("min_group_size", nargs="?", type=int, default=10,
-                          help="minimum images per group to import (default: 10)")
 
     kill_p = sub.add_parser("kill", help="kill a sandbox")
     kill_p.add_argument("name", nargs="?", help="sandbox name")
     kill_p.add_argument("--all", action="store_true", help="kill all sandboxes")
+
+    sub.add_parser("buildkit-stop", help="stop the managed buildkitd daemon")
 
     args = parser.parse_args()
 
@@ -521,8 +417,10 @@ def main() -> None:
         cmd_kill(args)
     elif args.command == "setup":
         cmd_setup(args)
-    elif args.command == "warmup":
-        cmd_warmup(args)
+    elif args.command == "buildkit-stop":
+        from nitrobox.image.buildkit import BuildKitManager
+        BuildKitManager.get().stop()
+        print("buildkitd stopped")
     else:
         parser.print_help()
 
