@@ -25,13 +25,28 @@ _manager: BuildKitManager | None = None
 _lock = threading.Lock()
 
 
+def _default_buildkit_root() -> str:
+    """Default BuildKit root_dir, respecting XDG_DATA_HOME.
+
+    Resolution order (matches FreeDesktop XDG Base Directory spec):
+      1. ``$XDG_DATA_HOME/nitrobox/buildkit`` if XDG_DATA_HOME is set
+      2. ``~/.local/share/nitrobox/buildkit`` otherwise
+
+    Set ``XDG_DATA_HOME=/path/to/big/disk`` to relocate all
+    XDG-compliant app data (BuildKit cache + snapshots + image
+    registry) to a different filesystem.
+    """
+    xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return str(Path(xdg) / "nitrobox" / "buildkit")
+
+
 class BuildKitManager:
     """Singleton manager for embedded buildkitd lifecycle."""
 
     def __init__(self):
         self._handler_path: str | None = None
         self._server_proc: subprocess.Popen | None = None
-        self._root_dir = str(Path.home() / ".local/share/nitrobox/buildkit")
+        self._root_dir = _default_buildkit_root()
 
     @classmethod
     def get(cls) -> BuildKitManager:
