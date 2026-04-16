@@ -149,3 +149,16 @@ def acquire_layer_locks(layer_dirs: list[Path]) -> list[int]:
         fcntl.flock(fd, fcntl.LOCK_SH)
         fds.append(fd)
     return fds
+
+
+def release_layer_locks(fds: list[int]) -> None:
+    """Release shared locks acquired by :func:`acquire_layer_locks`."""
+    for fd in fds:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass

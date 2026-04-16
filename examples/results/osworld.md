@@ -72,14 +72,17 @@ Full debug writeup: [`dev/blog_debug.md`](../../dev/blog_debug.md).
 ```bash
 # 1. Clone our OSWorld fork (includes nitrobox provider + THP fix)
 git clone -b nitrobox-provider https://github.com/rucnyz/OSWorld.git
-cd OSWorld && pip install -r requirements.txt
+cd OSWorld
+uv sync                                # install osworld deps from uv.lock
+uv pip install -e /path/to/nitrobox    # make the nitrobox provider importable
 
 # 2. Verify KVM access
 test -w /dev/kvm && echo "KVM OK"
 
 # 3. Run e2e comparison (Claude Sonnet 4.6, 100 tasks, 10 concurrency)
-ANTHROPIC_API_KEY=sk-ant-... python examples/bench_osworld_e2e.py \
-    --osworld-dir /path/to/osworld \
+ANTHROPIC_API_KEY=sk-ant-... .venv/bin/python \
+    /path/to/nitrobox/examples/bench_osworld_e2e.py \
+    --osworld-dir . \
     --n-tasks 100 --max-steps 30 \
     --envs nitrobox,docker \
     --concurrency 10
