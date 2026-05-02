@@ -105,6 +105,47 @@ ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
     --envs docker,nitrobox
 ```
 
+## DT-Agent compose envs (`bench_dt.py`)
+
+Pure infrastructure-overhead benchmark across the docker-compose
+environments shipped in [DecodingTrust-Agent](https://github.com/AI-secure/DecodingTrust-Agent)
+(`dt_arena/envs/<env>/docker-compose.yml`). Measures the sandbox lifecycle
+only — no LLM, no agent — to isolate the per-task overhead each backend
+adds on top of the actual task work.
+
+```bash
+# 3 small envs, default 3 reset cycles
+python examples/bench_dt.py --dt-dir /path/to/DecodingTrust-Agent
+
+# Single env, more cycles
+python examples/bench_dt.py \
+    --dt-dir /path/to/DecodingTrust-Agent \
+    --envs finance --reset-cycles 5
+
+# Quantify the start_interval override gain (compare against the
+# docker-engine default of 5s)
+python examples/bench_dt.py \
+    --dt-dir /path/to/DecodingTrust-Agent \
+    --healthcheck-start-interval 5.0
+```
+
+Sample warm-cache run on `finance` (single Flask service, c=1, 2 reset cycles):
+
+| Phase    | Docker | NitroBox | Speedup |
+|----------|-------:|---------:|--------:|
+| create   |  0.36s |    0.10s |     3.6× |
+| reset    | 10.88s |    0.11s |     99×  |
+| shutdown | 10.26s |    0.09s |    114×  |
+| **per-task overhead** | **22.0s** | **1.3s** | **17×** |
+
+The reset/shutdown gap is structural: nitrobox flips an overlayfs
+upper-layer rename (~30 ms) where Docker does a `stop → remove →
+create → start` cycle. Pass `--healthcheck-start-interval 0.5`
+(default) so the nitrobox health-monitor doesn't sit on the
+docker-engine default of 5 s waiting for the first probe — that
+override goes through `ComposeProject(healthcheck_overrides=...)`
+without forking the upstream compose file.
+
 ## Micro Benchmark
 
 ```bash

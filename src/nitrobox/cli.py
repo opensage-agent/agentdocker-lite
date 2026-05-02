@@ -183,25 +183,28 @@ def cmd_image_ls(args: argparse.Namespace) -> None:
 
 
 def cmd_image_rm(args: argparse.Namespace) -> None:
-    from nitrobox.image.buildkit import BuildKitManager
-
     registry = _image_registry()
     targets = list(args.images)
 
-    # Warn about unknown images but still attempt delete — user may know
-    # about an image that's in the content store but not registered (e.g.
-    # from an earlier version that used a different registry format).
+    in_registry = [i for i in targets if i in registry]
     missing = [i for i in targets if i not in registry]
+
     if missing:
         print(
-            f"Warning: not in registry (attempting delete anyway): "
-            f"{', '.join(missing)}",
+            f"Warning: not in registry: {', '.join(missing)}",
             file=sys.stderr,
         )
 
-    bk = BuildKitManager.get()
+    # Skip the (slow + side-effecting) buildkitd spawn when nothing
+    # we're asked to delete is actually in the cache. `docker rmi`
+    # behaves the same — non-existent images are a no-op, not fatal.
+    if in_registry:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        for image in in_registry:
+            bk.delete_image(image)
+
     for image in targets:
-        bk.delete_image(image)
         print(f"Deleted: {image}")
 
 

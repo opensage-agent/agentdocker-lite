@@ -138,6 +138,7 @@ class ComposeProject:
         env: dict[str, str] | None = None,
         env_base_dir: str | None = None,
         rootfs_cache_dir: str | None = None,
+        healthcheck_overrides: dict[str, float | str] | None = None,
     ) -> None:
         if isinstance(compose_file, (str, Path)):
             compose_files = [Path(compose_file).resolve()]
@@ -155,6 +156,13 @@ class ComposeProject:
         self._env = {**os.environ, **(env or {})}
         self._env_base_dir = env_base_dir
         self._rootfs_cache_dir = rootfs_cache_dir
+        # Per-project overrides for healthcheck timing fields. Keys: any
+        # subset of {"interval", "timeout", "start_period",
+        # "start_interval", "retries"}. Override wins over whatever the
+        # compose file declared. Use case: agent-eval / RL workloads
+        # want a much tighter `start_interval` (default 5s, matching
+        # docker engine) without forking each upstream compose file.
+        self._healthcheck_overrides = healthcheck_overrides or {}
 
         self._defs, self._named_volumes = _parse_compose(
             compose_files, self._env,
@@ -811,14 +819,26 @@ class ComposeProject:
         if old is not None:
             old.stop()
 
+        # healthcheck_overrides win over compose-declared values, so a
+        # caller can globally tighten poll cadence without forking each
+        # upstream compose file.
+        def _hc(field: str, default: str) -> float:
+            override = self._healthcheck_overrides.get(field)
+            if override is not None:
+                return float(override) if not isinstance(override, str) else _parse_duration(override)
+            return _parse_duration(hc.get(field, default))
+
+        retries_override = self._healthcheck_overrides.get("retries")
+        retries = int(retries_override) if retries_override is not None else int(hc.get("retries", 3))
+
         self._health_monitors[name] = _HealthMonitor(
             self._sandboxes[name],
             cmd,
-            interval=_parse_duration(hc.get("interval", "30s")),
-            timeout=_parse_duration(hc.get("timeout", "30s")),
-            start_period=_parse_duration(hc.get("start_period", "0s")),
-            start_interval=_parse_duration(hc.get("start_interval", "5s")),
-            retries=int(hc.get("retries", 3)),
+            interval=_hc("interval", "30s"),
+            timeout=_hc("timeout", "30s"),
+            start_period=_hc("start_period", "0s"),
+            start_interval=_hc("start_interval", "5s"),
+            retries=retries,
         )
 
     def _wait_healthy(self, name: str, timeout: int) -> None:
